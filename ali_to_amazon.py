@@ -831,21 +831,21 @@ def rehost_image(img_url):
     _save_image_locally(jpeg_bytes, img_url)
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
-    # Try catbox.moe (permanent, free, direct URLs ending in .jpg)
+    # Try litterbox first (72h temp hosting — more reliable than catbox currently)
+    for attempt in range(2):
+        hosted_url = _upload_to_litterbox(jpeg_bytes)
+        if hosted_url and _verify_hosted_image(hosted_url):
+            log.info(f"          [IMG] Hosted (temp): {hosted_url}")
+            return hosted_url
+        elif hosted_url:
+            log.warning(f"          [IMG] litterbox attempt {attempt+1}: empty/unreachable, retrying...")
+            time.sleep(1)
+
+    # Try catbox.moe (permanent but currently unreliable)
     hosted_url = _upload_to_catbox(jpeg_bytes)
     if hosted_url and _verify_hosted_image(hosted_url):
         log.info(f"          [IMG] Hosted: {hosted_url}")
         return hosted_url
-    elif hosted_url:
-        log.warning(f"          [IMG] catbox URL returned but image empty/unreachable, trying fallback")
-
-    # Try litterbox (temporary 72h, same service)
-    hosted_url = _upload_to_litterbox(jpeg_bytes)
-    if hosted_url and _verify_hosted_image(hosted_url):
-        log.info(f"          [IMG] Hosted (temp): {hosted_url}")
-        return hosted_url
-    elif hosted_url:
-        log.warning(f"          [IMG] litterbox URL returned but image empty/unreachable, trying fallback")
 
     # Try imgbb as fallback
     try:
@@ -862,7 +862,7 @@ def rehost_image(img_url):
             if url:
                 log.info(f"          [IMG] imgbb: {url}")
                 return url
-        log.info(f"          [IMG] imgbb response: {resp.status_code}")
+        log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         log.info(f"          [IMG] imgbb error: {e}")
 
