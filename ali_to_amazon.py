@@ -977,16 +977,53 @@ def find_amazon_template():
 
 def detect_columns(ws):
     cols = {}
+    max_used = 0
     for c in range(1, 310):
         val = ws.cell(row=3, column=c).value
         if val:
             cols[str(val).strip().lower()] = c
+            max_used = c
         val2 = ws.cell(row=2, column=c).value
         if val2:
             key2 = str(val2).strip().lower()
             if key2 not in cols:
                 cols[key2] = c
+            max_used = max(max_used, c)
+
+    # Add required TOY_FIGURE fields if missing from ART_CRAFT_KIT template
+    required_extra = [
+        "unit_count", "unit_count_type",
+        "length_height_floor_to_top", "length_height_floor_to_top_unit_of_measure",
+        "length_width_side_to_side", "length_width_side_to_side_unit_of_measure",
+        "length_head_to_toe", "length_head_to_toe_unit_of_measure",
+    ]
+    for field in required_extra:
+        if field not in cols:
+            max_used += 1
+            ws.cell(row=1, column=max_used, value=field)
+            ws.cell(row=2, column=max_used, value=field)
+            ws.cell(row=3, column=max_used, value=field)
+            cols[field] = max_used
+
     return cols
+
+
+def _fill_toy_figure_fields(ws, row, col):
+    """Fill required TOY_FIGURE dimension fields with defaults."""
+    fields = {
+        "unit_count": 1,
+        "unit_count_type": "Count",
+        "length_height_floor_to_top": 10,
+        "length_height_floor_to_top_unit_of_measure": "CM",
+        "length_width_side_to_side": 5,
+        "length_width_side_to_side_unit_of_measure": "CM",
+        "length_head_to_toe": 10,
+        "length_head_to_toe_unit_of_measure": "CM",
+    }
+    for field, value in fields.items():
+        c = col(field)
+        if c:
+            ws.cell(row=row, column=c, value=value)
 
 
 def fill_amazon_template(template_path, products):
@@ -1116,6 +1153,7 @@ def fill_amazon_template(template_path, products):
             c = col("is_expiration_dated_product")
             if c:
                 ws.cell(row=row, column=c, value="No")
+            _fill_toy_figure_fields(ws, row, col)
             c = col("list_price_with_tax")
             if c:
                 ws.cell(row=row, column=c, value=sell_price)
@@ -1222,6 +1260,7 @@ def fill_amazon_template(template_path, products):
                 c = col("is_expiration_dated_product")
                 if c:
                     ws.cell(row=row, column=c, value="No")
+                _fill_toy_figure_fields(ws, row, col)
 
                 # Fulfillment
                 c = col("fulfillment_availability#1.fulfillment_channel_code")
@@ -1330,6 +1369,7 @@ def fill_amazon_template(template_path, products):
             c = col("is_expiration_dated_product")
             if c:
                 ws.cell(row=row, column=c, value="No")
+            _fill_toy_figure_fields(ws, row, col)
 
             # Fulfillment
             c = col("fulfillment_availability#1.fulfillment_channel_code")
