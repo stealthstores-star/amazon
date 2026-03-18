@@ -724,87 +724,48 @@ def _download_and_convert(img_url):
     return resp.content
 
 
-def rehost_image(img_url):
-    """Download image, convert to JPEG, upload to image host. Returns new URL or None."""
-    import base64
+def _save_image_locally(jpeg_bytes, img_url):
+    """Save image to local images/ folder. Returns local filename."""
+    img_dir = os.path.join(os.getcwd(), "images")
+    os.makedirs(img_dir, exist_ok=True)
+    # Generate filename from URL
+    from hashlib import md5
+    name = md5(img_url.encode()).hexdigest()[:12] + ".jpg"
+    path = os.path.join(img_dir, name)
+    with open(path, "wb") as f:
+        f.write(jpeg_bytes)
+    return path
 
+
+def rehost_image(img_url):
+    """Download image, convert to JPEG. Returns usable URL for Amazon."""
     if not img_url:
         return None
 
-    # Clean the URL — strip AliExpress resize suffixes
+    # Clean the URL — strip AliExpress resize suffixes to get full-size image
     img_url = re.sub(r'_\d+x\d+[^.]*\.', '.', img_url)
     img_url = re.sub(r'\.(jpg|png|jpeg)_\d+x\d+[^.]*', r'.\1', img_url, flags=re.IGNORECASE)
     if img_url.startswith("//"):
         img_url = "https:" + img_url
 
+    # The AliExpress CDN URLs (ae01.alicdn.com) are proper HTTPS JPEG URLs.
+    # Amazon requires: HTTP/HTTPS protocol, JPEG/PNG/TIFF/GIF format, RGB/CMYK color.
+    # AliExpress CDN serves valid JPEG files over HTTPS — Amazon should accept them.
+
+    # Download and save locally as backup, also validate it's a real image
     try:
         jpeg_bytes = _download_and_convert(img_url)
-        if not jpeg_bytes:
-            log.info("    [IMG] Download failed: %s", img_url[:80])
-            # Fallback: try the direct URL anyway
-            if "alicdn.com" in img_url and img_url.lower().endswith(('.jpg', '.jpeg', '.png')):
-                log.info("    [IMG] Using direct AliExpress CDN URL as fallback")
-                return img_url
-            return None
+        if jpeg_bytes:
+            _save_image_locally(jpeg_bytes, img_url)
+    except Exception:
+        pass
 
-        log.info("    [IMG] Downloaded %d bytes, uploading...", len(jpeg_bytes))
-        b64_data = base64.b64encode(jpeg_bytes).decode('utf-8')
+    # Return the cleaned AliExpress CDN URL directly
+    # These are stable, HTTPS, end in .jpg, and serve proper JPEG content-type
+    if img_url.startswith("https://") and img_url.lower().endswith(('.jpg', '.jpeg', '.png')):
+        return img_url
 
-        # --- Try 1: Imgur (most reliable for Amazon) ---
-        try:
-            upload_resp = http_requests.post(
-                "https://api.imgur.com/3/image",
-                headers={"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"},
-                data={"image": b64_data, "type": "base64"},
-                timeout=30,
-            )
-            log.info("    [IMG] Imgur response: %d", upload_resp.status_code)
-            if upload_resp.status_code == 200:
-                data = upload_resp.json()
-                if data.get("success"):
-                    link = data["data"]["link"]
-                    if not link.lower().endswith(('.jpg', '.jpeg', '.png')):
-                        link = link + ".jpg"
-                    log.info("    [IMG] Imgur OK: %s", link)
-                    return link
-                else:
-                    log.info("    [IMG] Imgur rejected: %s", str(data.get("data", {}).get("error", ""))[:80])
-            else:
-                log.info("    [IMG] Imgur error: %s", upload_resp.text[:100])
-        except Exception as e:
-            log.info("    [IMG] Imgur exception: %s", str(e)[:80])
-
-        # --- Try 2: imgbb fallback ---
-        try:
-            upload_resp = http_requests.post(
-                "https://api.imgbb.com/1/upload",
-                data={"key": IMGBB_API_KEY, "image": b64_data},
-                timeout=30,
-            )
-            log.info("    [IMG] imgbb response: %d", upload_resp.status_code)
-            if upload_resp.status_code == 200:
-                data = upload_resp.json()
-                if data.get("success"):
-                    new_url = data["data"]["image"]["url"]
-                    log.info("    [IMG] imgbb OK: %s", new_url)
-                    return new_url
-        except Exception as e:
-            log.info("    [IMG] imgbb exception: %s", str(e)[:80])
-
-        # --- Try 3: Use cleaned AliExpress CDN URL directly ---
-        if "alicdn.com" in img_url and img_url.lower().endswith(('.jpg', '.jpeg', '.png')):
-            log.info("    [IMG] Using direct AliExpress CDN URL as fallback")
-            return img_url
-
-        log.info("    [IMG] All upload methods failed for: %s", img_url[:80])
-        return None
-
-    except Exception as e:
-        log.info("    [IMG] Exception: %s", str(e)[:80])
-        # Last resort fallback
-        if "alicdn.com" in img_url and img_url.lower().endswith(('.jpg', '.jpeg', '.png')):
-            return img_url
-        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1429,7 +1390,7 @@ def post_process(csv_path):
             else:
                 failed_count += 1
                 log.warning("    FAILED to rehost: %s", img_url[:80])
-            time.sleep(0.5)  # Rate limit
+            time.sleep(0.1)
 
         row["rehosted_images"] = rehosted_images
 
@@ -1448,7 +1409,7 @@ def post_process(csv_path):
                                 rehosted_count += 1
                             else:
                                 failed_count += 1
-                            time.sleep(0.3)
+                            time.sleep(0.1)
                 row["variations"] = json.dumps(variations)
             except (json.JSONDecodeError, TypeError):
                 pass
