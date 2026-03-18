@@ -801,6 +801,30 @@ def _verify_hosted_image(url):
     return False
 
 
+def _upload_to_imgur(jpeg_bytes):
+    """Upload JPEG bytes to Imgur (anonymous). Returns direct URL or None."""
+    try:
+        import base64
+        b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+        resp = http_requests.post(
+            "https://api.imgur.com/3/image",
+            headers={"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"},
+            data={"image": b64, "type": "base64"},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            link = data.get("data", {}).get("link", "")
+            if link:
+                # Ensure HTTPS
+                link = link.replace("http://", "https://")
+                return link
+        log.info(f"          [IMG] Imgur response: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        log.info(f"          [IMG] Imgur error: {e}")
+    return None
+
+
 def rehost_image(img_url):
     """Download image, convert to JPEG, upload to hosting. Returns URL for Amazon."""
     if not img_url:
@@ -832,21 +856,15 @@ def rehost_image(img_url):
     _save_image_locally(jpeg_bytes, img_url)
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
-    # Try litterbox first (72h temp hosting — more reliable than catbox currently)
+    # Try Imgur first (well-known host, Amazon can always fetch from it)
     for attempt in range(2):
-        hosted_url = _upload_to_litterbox(jpeg_bytes)
+        hosted_url = _upload_to_imgur(jpeg_bytes)
         if hosted_url and _verify_hosted_image(hosted_url):
-            log.info(f"          [IMG] Hosted (temp): {hosted_url}")
+            log.info(f"          [IMG] Imgur: {hosted_url}")
             return hosted_url
         elif hosted_url:
-            log.warning(f"          [IMG] litterbox attempt {attempt+1}: empty/unreachable, retrying...")
-            time.sleep(1)
-
-    # Try catbox.moe (permanent but currently unreliable)
-    hosted_url = _upload_to_catbox(jpeg_bytes)
-    if hosted_url and _verify_hosted_image(hosted_url):
-        log.info(f"          [IMG] Hosted: {hosted_url}")
-        return hosted_url
+            log.warning(f"          [IMG] Imgur attempt {attempt+1}: unreachable, retrying...")
+            time.sleep(2)
 
     # Try imgbb as fallback
     try:
@@ -867,7 +885,12 @@ def rehost_image(img_url):
     except Exception as e:
         log.info(f"          [IMG] imgbb error: {e}")
 
-    # AliExpress CDN URLs return 403 without cookies — don't use as fallback
+    # Try catbox as last resort
+    hosted_url = _upload_to_catbox(jpeg_bytes)
+    if hosted_url and _verify_hosted_image(hosted_url):
+        log.info(f"          [IMG] catbox: {hosted_url}")
+        return hosted_url
+
     log.warning(f"          [IMG] All hosting failed for: {img_url[:80]}")
     return None
 
@@ -997,7 +1020,7 @@ def find_amazon_template():
 def detect_columns(ws):
     cols = {}
     max_used = 0
-    for c in range(1, 310):
+    for c in range(1, 460):
         val = ws.cell(row=3, column=c).value
         if val:
             cols[str(val).strip().lower()] = c
