@@ -679,15 +679,54 @@ def scroll_and_extract(tab):
 
 
 # ---------------------------------------------------------------------------
-# Image rehosting — convert to JPEG, upload to imgbb
+# Image rehosting — convert to JPEG, upload to Imgur
 # ---------------------------------------------------------------------------
-def rehost_image(img_url):
-    """Download image, convert to JPEG, upload to imgbb. Returns new URL or None."""
+IMGUR_CLIENT_ID = "546c25a59c58ad7"  # Anonymous upload client ID
+
+def _download_and_convert(img_url):
+    """Download image from URL, convert to proper JPEG bytes. Returns bytes or None."""
     try:
         from PIL import Image
         has_pillow = True
     except ImportError:
         has_pillow = False
+
+    resp = http_requests.get(img_url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "image/*",
+        "Referer": "https://www.aliexpress.com/",
+    }, timeout=15)
+
+    if resp.status_code != 200:
+        return None
+
+    if has_pillow:
+        try:
+            img = Image.open(BytesIO(resp.content))
+            w, h = img.size
+            longest = max(w, h)
+            if longest < 1000:
+                scale = 1000 / longest
+                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            if img.mode in ('RGBA', 'P', 'LA'):
+                bg = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                bg.paste(img, mask=img.split()[-1] if 'A' in img.mode else None)
+                img = bg
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            jpeg_buffer = BytesIO()
+            img.save(jpeg_buffer, format='JPEG', quality=92)
+            return jpeg_buffer.getvalue()
+        except Exception:
+            return resp.content
+    return resp.content
+
+
+def rehost_image(img_url):
+    """Download image, convert to JPEG, upload to image host. Returns new URL or None."""
+    import base64
 
     if not img_url:
         return None
@@ -699,60 +738,49 @@ def rehost_image(img_url):
         img_url = "https:" + img_url
 
     try:
-        resp = http_requests.get(img_url, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Accept": "image/*",
-            "Referer": "https://www.aliexpress.com/",
-        }, timeout=15)
-
-        if resp.status_code != 200:
+        jpeg_bytes = _download_and_convert(img_url)
+        if not jpeg_bytes:
             return None
 
-        # Convert to proper JPEG
-        if has_pillow:
-            try:
-                img = Image.open(BytesIO(resp.content))
-                # Ensure minimum 1000px on longest side for Amazon zoom
-                w, h = img.size
-                longest = max(w, h)
-                if longest < 1000:
-                    scale = 1000 / longest
-                    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-                if img.mode in ('RGBA', 'P', 'LA'):
-                    # White background for transparency
-                    bg = Image.new('RGB', img.size, (255, 255, 255))
-                    if img.mode == 'P':
-                        img = img.convert('RGBA')
-                    bg.paste(img, mask=img.split()[-1] if 'A' in img.mode else None)
-                    img = bg
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
-                jpeg_buffer = BytesIO()
-                img.save(jpeg_buffer, format='JPEG', quality=92)
-                jpeg_bytes = jpeg_buffer.getvalue()
-            except Exception:
-                jpeg_bytes = resp.content
-        else:
-            jpeg_bytes = resp.content
-
-        # Upload to imgbb — returns a proper HTTPS JPEG URL Amazon accepts
-        import base64
         b64_data = base64.b64encode(jpeg_bytes).decode('utf-8')
-        upload_resp = http_requests.post(
-            "https://api.imgbb.com/1/upload",
-            data={
-                "key": IMGBB_API_KEY,
-                "image": b64_data,
-            },
-            timeout=30,
-        )
 
-        if upload_resp.status_code == 200:
-            data = upload_resp.json()
-            if data.get("success"):
-                # Use the direct image URL (ends in .jpg/.png)
-                new_url = data["data"]["image"]["url"]
-                return new_url
+        # --- Try 1: Imgur (most reliable for Amazon) ---
+        try:
+            upload_resp = http_requests.post(
+                "https://api.imgur.com/3/image",
+                headers={"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"},
+                data={"image": b64_data, "type": "base64"},
+                timeout=30,
+            )
+            if upload_resp.status_code == 200:
+                data = upload_resp.json()
+                if data.get("success"):
+                    link = data["data"]["link"]
+                    # Ensure it ends with .jpg for Amazon
+                    if not link.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        link = link + ".jpg"
+                    return link
+        except Exception:
+            pass
+
+        # --- Try 2: imgbb fallback ---
+        try:
+            upload_resp = http_requests.post(
+                "https://api.imgbb.com/1/upload",
+                data={"key": IMGBB_API_KEY, "image": b64_data},
+                timeout=30,
+            )
+            if upload_resp.status_code == 200:
+                data = upload_resp.json()
+                if data.get("success"):
+                    return data["data"]["image"]["url"]
+        except Exception:
+            pass
+
+        # --- Try 3: Use cleaned AliExpress CDN URL directly ---
+        # Amazon MAY accept alicdn.com URLs if they end in .jpg
+        if "alicdn.com" in img_url and img_url.lower().endswith(('.jpg', '.jpeg', '.png')):
+            return img_url
 
         return None
 
@@ -1378,9 +1406,11 @@ def post_process(csv_path):
             if new_url:
                 rehosted_images.append(new_url)
                 rehosted_count += 1
+                log.debug("    OK: %s -> %s", img_url[:60], new_url[:60])
             else:
                 failed_count += 1
-            time.sleep(0.3)  # Rate limit
+                log.warning("    FAILED to rehost: %s", img_url[:80])
+            time.sleep(0.5)  # Rate limit
 
         row["rehosted_images"] = rehosted_images
 
