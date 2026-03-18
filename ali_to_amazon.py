@@ -787,6 +787,19 @@ def _upload_to_litterbox(jpeg_bytes):
     return None
 
 
+def _verify_hosted_image(url):
+    """HEAD-check a hosted image URL to confirm it has content."""
+    try:
+        resp = http_requests.head(url, timeout=10, allow_redirects=True)
+        length = int(resp.headers.get("content-length", 0))
+        if resp.status_code == 200 and length > 0:
+            return True
+        log.debug(f"          [IMG] Verify failed: status={resp.status_code} length={length}")
+    except Exception as e:
+        log.debug(f"          [IMG] Verify error: {e}")
+    return False
+
+
 def rehost_image(img_url):
     """Download image, convert to JPEG, upload to hosting. Returns URL for Amazon."""
     if not img_url:
@@ -820,15 +833,19 @@ def rehost_image(img_url):
 
     # Try catbox.moe (permanent, free, direct URLs ending in .jpg)
     hosted_url = _upload_to_catbox(jpeg_bytes)
-    if hosted_url:
+    if hosted_url and _verify_hosted_image(hosted_url):
         log.info(f"          [IMG] Hosted: {hosted_url}")
         return hosted_url
+    elif hosted_url:
+        log.warning(f"          [IMG] catbox URL returned but image empty/unreachable, trying fallback")
 
     # Try litterbox (temporary 72h, same service)
     hosted_url = _upload_to_litterbox(jpeg_bytes)
-    if hosted_url:
+    if hosted_url and _verify_hosted_image(hosted_url):
         log.info(f"          [IMG] Hosted (temp): {hosted_url}")
         return hosted_url
+    elif hosted_url:
+        log.warning(f"          [IMG] litterbox URL returned but image empty/unreachable, trying fallback")
 
     # Try imgbb as fallback
     try:
@@ -990,14 +1007,8 @@ def detect_columns(ws):
                 cols[key2] = c
             max_used = max(max_used, c)
 
-    # Add required TOY_FIGURE fields if missing from ART_CRAFT_KIT template
-    required_extra = [
-        "unit_count", "unit_count_type",
-        "length_height_floor_to_top", "length_height_floor_to_top_unit_of_measure",
-        "length_width_side_to_side", "length_width_side_to_side_unit_of_measure",
-        "length_head_to_toe", "length_head_to_toe_unit_of_measure",
-    ]
-    for field in required_extra:
+    # Ensure unit_count/unit_count_type columns exist if missing
+    for field in ["unit_count", "unit_count_type"]:
         if field not in cols:
             max_used += 1
             ws.cell(row=1, column=max_used, value=field)
@@ -1009,16 +1020,16 @@ def detect_columns(ws):
 
 
 def _fill_toy_figure_fields(ws, row, col):
-    """Fill required TOY_FIGURE dimension fields with defaults."""
+    """Fill dimension fields with defaults using actual template columns."""
     fields = {
         "unit_count": 1,
         "unit_count_type": "Count",
-        "length_height_floor_to_top": 10,
-        "length_height_floor_to_top_unit_of_measure": "CM",
-        "length_width_side_to_side": 5,
-        "length_width_side_to_side_unit_of_measure": "CM",
-        "length_head_to_toe": 10,
-        "length_head_to_toe_unit_of_measure": "CM",
+        "item_height": 10,
+        "item_height_unit_of_measure": "CM",
+        "item_width": 5,
+        "item_width_unit_of_measure": "CM",
+        "item_length": 10,
+        "item_length_unit_of_measure": "CM",
     }
     for field, value in fields.items():
         c = col(field)
