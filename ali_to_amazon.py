@@ -867,11 +867,8 @@ def rehost_image(img_url):
     except Exception as e:
         log.info(f"          [IMG] imgbb error: {e}")
 
-    # Last resort: use AliExpress CDN URL directly
-    if img_url.startswith("https://") and img_url.lower().endswith(('.jpg', '.jpeg', '.png')):
-        log.info(f"          [IMG] Using CDN fallback: {img_url}")
-        return img_url
-
+    # AliExpress CDN URLs return 403 without cookies — don't use as fallback
+    log.warning(f"          [IMG] All hosting failed for: {img_url[:80]}")
     return None
 
 
@@ -1008,8 +1005,14 @@ def detect_columns(ws):
                 cols[key2] = c
             max_used = max(max_used, c)
 
-    # Ensure unit_count/unit_count_type columns exist if missing
-    for field in ["unit_count", "unit_count_type"]:
+    # Ensure required TOY_FIGURE fields exist if missing from template
+    required_extra = [
+        "unit_count", "unit_count_type",
+        "length_height_floor_to_top", "length_height_floor_to_top_unit_of_measure",
+        "length_width_side_to_side", "length_width_side_to_side_unit_of_measure",
+        "length_head_to_toe", "length_head_to_toe_unit_of_measure",
+    ]
+    for field in required_extra:
         if field not in cols:
             max_used += 1
             ws.cell(row=1, column=max_used, value=field)
@@ -1021,16 +1024,16 @@ def detect_columns(ws):
 
 
 def _fill_toy_figure_fields(ws, row, col):
-    """Fill dimension fields with defaults using actual template columns."""
+    """Fill required TOY_FIGURE dimension fields with defaults."""
     fields = {
         "unit_count": 1,
         "unit_count_type": "Count",
-        "item_height": 10,
-        "item_height_unit_of_measure": "CM",
-        "item_width": 5,
-        "item_width_unit_of_measure": "CM",
-        "item_length": 10,
-        "item_length_unit_of_measure": "CM",
+        "length_height_floor_to_top": 4,
+        "length_height_floor_to_top_unit_of_measure": "IN",
+        "length_width_side_to_side": 2,
+        "length_width_side_to_side_unit_of_measure": "IN",
+        "length_head_to_toe": 4,
+        "length_head_to_toe_unit_of_measure": "IN",
     }
     for field, value in fields.items():
         c = col(field)
