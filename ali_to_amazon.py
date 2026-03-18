@@ -62,7 +62,7 @@ ALI_SHIPPING_ESTIMATE = 2.00
 MIN_SELL_PRICE = 5.99
 
 # ---- IMAGE HOSTING ----
-IMGBB_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
+IMGBB_API_KEY = "dd9a3b6ab5cabf1a45a24736ffe29e42"
 
 # Keywords for resin model filtering
 RESIN_INCLUDE = [
