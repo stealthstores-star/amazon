@@ -26,6 +26,7 @@ import sys
 import time
 from datetime import datetime
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
@@ -760,7 +761,7 @@ def _upload_to_catbox(jpeg_bytes):
             "https://catbox.moe/user/api.php",
             data={"reqtype": "fileupload"},
             files={"fileToUpload": ("image.jpg", jpeg_bytes, "image/jpeg")},
-            timeout=30,
+            timeout=15,
         )
         if resp.status_code == 200 and resp.text.startswith("https://"):
             return resp.text.strip()
@@ -777,7 +778,7 @@ def _upload_to_litterbox(jpeg_bytes):
             "https://litterbox.catbox.moe/resources/internals/api.php",
             data={"reqtype": "fileupload", "time": "72h"},
             files={"fileToUpload": ("image.jpg", jpeg_bytes, "image/jpeg")},
-            timeout=30,
+            timeout=15,
         )
         if resp.status_code == 200 and resp.text.startswith("https://"):
             return resp.text.strip()
@@ -1504,61 +1505,79 @@ def post_process(csv_path):
         w.writerows(resin_rows)
     log.info("  Saved filtered CSV: %s", filtered_path)
 
-    # --- Step 3: Rehost ALL images ---
+    # --- Step 3: Rehost ALL images (parallel) ---
     log.info("Step 3: Rehosting images (Amazon-compatible JPEG hosting)...")
     rehosted_count = 0
     failed_count = 0
 
-    for row in resin_rows:
-        # Parse all images from the product_images field
+    # Collect all image URLs with back-references to where results go
+    upload_tasks = []  # list of (row_index, slot_type, slot_key, img_url)
+    for row_idx, row in enumerate(resin_rows):
         all_images_str = row.get("product_images", "")
         all_images = [img.strip() for img in all_images_str.split("|") if img.strip()] if all_images_str else []
-
-        # Fallback to single product_image
         if not all_images:
             single_img = row.get("product_image", "")
             if single_img:
                 all_images = [single_img]
+        for img_i, img_url in enumerate(all_images[:MAX_IMAGES]):
+            upload_tasks.append((row_idx, "main", img_i, img_url))
 
-        rehosted_images = []
-        for img_url in all_images[:MAX_IMAGES]:
-            new_url = rehost_image(img_url)
-            if new_url and new_url != "SKIPPED":
-                rehosted_images.append(new_url)
-                rehosted_count += 1
-                log.debug("    OK: %s -> %s", img_url[:60], new_url[:60])
-            elif new_url == "SKIPPED":
-                pass  # Thumbnail intentionally skipped, not a failure
-            else:
-                failed_count += 1
-                log.warning("    FAILED to rehost: %s", img_url[:80])
-            time.sleep(0.1)
-
-        row["rehosted_images"] = rehosted_images
-
-        # Also rehost variation images
         variations_raw = row.get("variations", "")
         if variations_raw:
             try:
                 variations = json.loads(variations_raw)
-                for var in variations:
-                    for opt in var.get("options", []):
+                for var_i, var in enumerate(variations):
+                    for opt_i, opt in enumerate(var.get("options", [])):
                         opt_img = opt.get("image", "")
                         if opt_img:
-                            new_url = rehost_image(opt_img)
-                            if new_url and new_url != "SKIPPED":
-                                opt["rehosted_image"] = new_url
-                                rehosted_count += 1
-                            elif new_url != "SKIPPED":
-                                failed_count += 1
-                            time.sleep(0.1)
-                row["variations"] = json.dumps(variations)
+                            upload_tasks.append((row_idx, "var", (var_i, opt_i), opt_img))
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        if (rehosted_count + failed_count) % 20 == 0:
-            log.info("    Processed %d images (%d success, %d failed)...",
-                     rehosted_count + failed_count, rehosted_count, failed_count)
+    log.info("  %d images to rehost across %d products (parallel, 6 workers)...",
+             len(upload_tasks), len(resin_rows))
+
+    # Run uploads in parallel
+    results = {}  # task_index -> new_url
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        future_map = {pool.submit(rehost_image, task[3]): i for i, task in enumerate(upload_tasks)}
+        for future in as_completed(future_map):
+            idx = future_map[future]
+            try:
+                results[idx] = future.result()
+            except Exception:
+                results[idx] = None
+            done = len(results)
+            if done % 20 == 0:
+                log.info("    Processed %d / %d images...", done, len(upload_tasks))
+
+    # Apply results back to rows
+    for task_idx, (row_idx, slot_type, slot_key, img_url) in enumerate(upload_tasks):
+        new_url = results.get(task_idx)
+        row = resin_rows[row_idx]
+        if new_url and new_url != "SKIPPED":
+            if slot_type == "main":
+                row.setdefault("rehosted_images", [])
+                # Store with index to preserve order
+                row.setdefault("_rehost_ordered", [])
+                row["_rehost_ordered"].append((slot_key, new_url))
+            else:
+                var_i, opt_i = slot_key
+                variations = json.loads(row.get("variations", "[]"))
+                variations[var_i]["options"][opt_i]["rehosted_image"] = new_url
+                row["variations"] = json.dumps(variations)
+            rehosted_count += 1
+        elif new_url == "SKIPPED":
+            pass
+        else:
+            failed_count += 1
+            log.warning("    FAILED to rehost: %s", img_url[:80])
+
+    # Finalize ordered main images
+    for row in resin_rows:
+        ordered = row.pop("_rehost_ordered", [])
+        ordered.sort(key=lambda x: x[0])
+        row["rehosted_images"] = [url for _, url in ordered]
 
     log.info("  Rehosted %d images, %d failed", rehosted_count, failed_count)
 
