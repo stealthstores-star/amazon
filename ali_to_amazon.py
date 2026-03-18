@@ -799,7 +799,7 @@ def rehost_image(img_url):
     # Skip tiny thumbnails/swatches — Amazon requires min 1000px
     if _is_thumbnail_url(img_url):
         log.info(f"          [IMG] Skipping thumbnail: {img_url}")
-        return None
+        return "SKIPPED"
 
     # Strip AliExpress resize suffixes to get full-size image
     img_url = re.sub(r'_\d+x\d+[^.]*\.', '.', img_url)
@@ -1512,10 +1512,12 @@ def post_process(csv_path):
         rehosted_images = []
         for img_url in all_images[:MAX_IMAGES]:
             new_url = rehost_image(img_url)
-            if new_url:
+            if new_url and new_url != "SKIPPED":
                 rehosted_images.append(new_url)
                 rehosted_count += 1
                 log.debug("    OK: %s -> %s", img_url[:60], new_url[:60])
+            elif new_url == "SKIPPED":
+                pass  # Thumbnail intentionally skipped, not a failure
             else:
                 failed_count += 1
                 log.warning("    FAILED to rehost: %s", img_url[:80])
@@ -1533,10 +1535,10 @@ def post_process(csv_path):
                         opt_img = opt.get("image", "")
                         if opt_img:
                             new_url = rehost_image(opt_img)
-                            if new_url:
+                            if new_url and new_url != "SKIPPED":
                                 opt["rehosted_image"] = new_url
                                 rehosted_count += 1
-                            else:
+                            elif new_url != "SKIPPED":
                                 failed_count += 1
                             time.sleep(0.1)
                 row["variations"] = json.dumps(variations)
