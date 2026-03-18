@@ -856,17 +856,7 @@ def rehost_image(img_url):
     _save_image_locally(jpeg_bytes, img_url)
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
-    # Try Imgur first (well-known host, Amazon can always fetch from it)
-    for attempt in range(2):
-        hosted_url = _upload_to_imgur(jpeg_bytes)
-        if hosted_url and _verify_hosted_image(hosted_url):
-            log.info(f"          [IMG] Imgur: {hosted_url}")
-            return hosted_url
-        elif hosted_url:
-            log.warning(f"          [IMG] Imgur attempt {attempt+1}: unreachable, retrying...")
-            time.sleep(2)
-
-    # Try imgbb as fallback
+    # Try imgbb first (reliable, Amazon-compatible)
     try:
         import base64
         b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
@@ -884,6 +874,12 @@ def rehost_image(img_url):
         log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         log.info(f"          [IMG] imgbb error: {e}")
+
+    # Try Imgur as fallback
+    hosted_url = _upload_to_imgur(jpeg_bytes)
+    if hosted_url and _verify_hosted_image(hosted_url):
+        log.info(f"          [IMG] Imgur: {hosted_url}")
+        return hosted_url
 
     # Try catbox as last resort
     hosted_url = _upload_to_catbox(jpeg_bytes)
