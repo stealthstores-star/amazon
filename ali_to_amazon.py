@@ -46,7 +46,7 @@ log = logging.getLogger("scraper")
 MARKUP = 3.0
 DEFAULT_PRICE_GBP = 12.99
 BROWSE_NODE = "364155031"       # Amazon UK: Action & Toy Figures
-PRODUCT_TYPE = "artcraftkit"
+PRODUCT_TYPE = "toyfigure"
 BRAND = "Generic"
 HANDLING_DAYS = 14
 QUANTITY = 5
@@ -984,9 +984,13 @@ def make_description(title):
 # Amazon template filling
 # ---------------------------------------------------------------------------
 def find_amazon_template():
-    xlsm_files = [f for f in os.listdir(".") if f.endswith(".xlsm") and "upload" not in f.lower()]
+    xlsm_files = [f for f in os.listdir(".") if f.endswith(".xlsm") and "upload" not in f.lower() and "processing" not in f.lower()]
     if not xlsm_files:
         return None
+    # Prefer TOY_FIGURE template
+    for f in xlsm_files:
+        if "toy_figure" in f.lower() or "toyfigure" in f.lower():
+            return f
     return xlsm_files[0]
 
 
@@ -1005,8 +1009,14 @@ def detect_columns(ws):
                 cols[key2] = c
             max_used = max(max_used, c)
 
-    # Ensure unit_count/unit_count_type columns exist if missing
-    for field in ["unit_count", "unit_count_type"]:
+    # Ensure required TOY_FIGURE fields exist if missing from template
+    required_extra = [
+        "unit_count", "unit_count_type",
+        "length_height_floor_to_top", "length_height_floor_to_top_unit_of_measure",
+        "length_width_side_to_side", "length_width_side_to_side_unit_of_measure",
+        "length_head_to_toe", "length_head_to_toe_unit_of_measure",
+    ]
+    for field in required_extra:
         if field not in cols:
             max_used += 1
             ws.cell(row=1, column=max_used, value=field)
@@ -1018,16 +1028,16 @@ def detect_columns(ws):
 
 
 def _fill_toy_figure_fields(ws, row, col):
-    """Fill artcraftkit dimension fields with defaults."""
+    """Fill required TOY_FIGURE dimension fields with defaults."""
     fields = {
         "unit_count": 1,
         "unit_count_type": "Count",
-        "item_height": 10,
-        "item_height_unit_of_measure": "CM",
-        "item_width": 5,
-        "item_width_unit_of_measure": "CM",
-        "item_length": 10,
-        "item_length_unit_of_measure": "CM",
+        "length_height_floor_to_top": 10,
+        "length_height_floor_to_top_unit_of_measure": "Centimetres",
+        "length_width_side_to_side": 5,
+        "length_width_side_to_side_unit_of_measure": "Centimetres",
+        "length_head_to_toe": 10,
+        "length_head_to_toe_unit_of_measure": "Centimetres",
     }
     for field, value in fields.items():
         c = col(field)
