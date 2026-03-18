@@ -1455,6 +1455,8 @@ def main():
     parser.add_argument("-o", "--output", default=None, help="Output CSV path")
     parser.add_argument("--skip-details", action="store_true",
                         help="Skip visiting individual product pages (faster but only 1 image)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Limit total number of products to scrape (0 = no limit)")
     args = parser.parse_args()
 
     lines = Path(args.urls_file).read_text().splitlines()
@@ -1634,6 +1636,14 @@ def main():
                     log.info("  No products on page %d — done.", pg)
                     break
 
+                # --- Apply limit ---
+                if args.limit > 0:
+                    remaining = args.limit - csv_out.count
+                    if remaining <= 0:
+                        log.info("  Reached product limit (%d). Stopping.", args.limit)
+                        break
+                    products = products[:remaining]
+
                 # --- Visit each product detail page for ALL images + variations ---
                 if not args.skip_details:
                     for p_idx, product in enumerate(products):
@@ -1686,6 +1696,10 @@ def main():
                 new_count = csv_out.count - prev_total
                 log.info("  Page %d: %d products, %d new (total: %d)", pg, len(products), new_count, csv_out.count)
 
+                if args.limit > 0 and csv_out.count >= args.limit:
+                    log.info("  Reached product limit (%d). Stopping.", args.limit)
+                    break
+
                 if new_count == 0 and pg > 1:
                     log.info("  No new products — done with this URL.")
                     break
@@ -1701,6 +1715,9 @@ def main():
 
                 pg += 1
                 time.sleep(random.uniform(0.2, 0.5))
+
+            if args.limit > 0 and csv_out.count >= args.limit:
+                break
 
         try:
             context.close()
