@@ -44,8 +44,8 @@ log = logging.getLogger("scraper")
 # ---------------------------------------------------------------------------
 MARKUP = 3.0
 DEFAULT_PRICE_GBP = 12.99
-BROWSE_NODE = "319518031"       # Amazon UK: Craft Model Kits
-PRODUCT_TYPE = "artcraftkit"
+BROWSE_NODE = "364155031"       # Amazon UK: Action & Toy Figures
+PRODUCT_TYPE = "toyfigure"
 BRAND = "Generic"
 HANDLING_DAYS = 14
 QUANTITY = 5
@@ -61,7 +61,6 @@ ALI_SHIPPING_ESTIMATE = 2.00
 MIN_SELL_PRICE = 5.99
 
 # ---- IMAGE HOSTING ----
-# Use imgbb for reliable image hosting that Amazon accepts
 IMGBB_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
 
 # Keywords for resin model filtering
@@ -737,32 +736,122 @@ def _save_image_locally(jpeg_bytes, img_url):
     return path
 
 
+def _is_thumbnail_url(url):
+    """Check if URL is a tiny AliExpress thumbnail/swatch (e.g. /154x64.png, /60x60.png)."""
+    # Match dimension patterns in the URL path like /154x64.png or /60x60.jpg
+    m = re.search(r'/(\d+)x(\d+)\.\w+$', url)
+    if m:
+        w, h = int(m.group(1)), int(m.group(2))
+        if max(w, h) < 500:
+            return True
+    # Also catch _NNxNN suffixes in filename
+    m2 = re.search(r'_(\d+)x(\d+)', url)
+    if m2:
+        w, h = int(m2.group(1)), int(m2.group(2))
+        if max(w, h) < 500:
+            return True
+    return False
+
+
+def _upload_to_catbox(jpeg_bytes):
+    """Upload JPEG bytes to catbox.moe. Returns direct URL or None."""
+    try:
+        resp = http_requests.post(
+            "https://catbox.moe/user/api.php",
+            data={"reqtype": "fileupload"},
+            files={"fileToUpload": ("image.jpg", jpeg_bytes, "image/jpeg")},
+            timeout=30,
+        )
+        if resp.status_code == 200 and resp.text.startswith("https://"):
+            return resp.text.strip()
+        log.info(f"          [IMG] catbox response: {resp.status_code}")
+    except Exception as e:
+        log.info(f"          [IMG] catbox error: {e}")
+    return None
+
+
+def _upload_to_litterbox(jpeg_bytes):
+    """Upload JPEG bytes to litterbox.catbox.moe (temp hosting). Returns direct URL or None."""
+    try:
+        resp = http_requests.post(
+            "https://litterbox.catbox.moe/resources/internals/api.php",
+            data={"reqtype": "fileupload", "time": "72h"},
+            files={"fileToUpload": ("image.jpg", jpeg_bytes, "image/jpeg")},
+            timeout=30,
+        )
+        if resp.status_code == 200 and resp.text.startswith("https://"):
+            return resp.text.strip()
+        log.info(f"          [IMG] litterbox response: {resp.status_code}")
+    except Exception as e:
+        log.info(f"          [IMG] litterbox error: {e}")
+    return None
+
+
 def rehost_image(img_url):
-    """Download image, convert to JPEG. Returns usable URL for Amazon."""
+    """Download image, convert to JPEG, upload to hosting. Returns URL for Amazon."""
     if not img_url:
         return None
 
-    # Clean the URL — strip AliExpress resize suffixes to get full-size image
-    img_url = re.sub(r'_\d+x\d+[^.]*\.', '.', img_url)
-    img_url = re.sub(r'\.(jpg|png|jpeg)_\d+x\d+[^.]*', r'.\1', img_url, flags=re.IGNORECASE)
+    # Clean the URL
     if img_url.startswith("//"):
         img_url = "https:" + img_url
 
-    # The AliExpress CDN URLs (ae01.alicdn.com) are proper HTTPS JPEG URLs.
-    # Amazon requires: HTTP/HTTPS protocol, JPEG/PNG/TIFF/GIF format, RGB/CMYK color.
-    # AliExpress CDN serves valid JPEG files over HTTPS — Amazon should accept them.
+    # Skip tiny thumbnails/swatches — Amazon requires min 1000px
+    if _is_thumbnail_url(img_url):
+        log.info(f"          [IMG] Skipping thumbnail: {img_url}")
+        return None
 
-    # Download and save locally as backup, also validate it's a real image
+    # Strip AliExpress resize suffixes to get full-size image
+    img_url = re.sub(r'_\d+x\d+[^.]*\.', '.', img_url)
+    img_url = re.sub(r'\.(jpg|png|jpeg)_\d+x\d+[^.]*', r'.\1', img_url, flags=re.IGNORECASE)
+
+    # Download and convert to proper JPEG
+    jpeg_bytes = None
     try:
         jpeg_bytes = _download_and_convert(img_url)
-        if jpeg_bytes:
-            _save_image_locally(jpeg_bytes, img_url)
     except Exception:
         pass
 
-    # Return the cleaned AliExpress CDN URL directly
-    # These are stable, HTTPS, end in .jpg, and serve proper JPEG content-type
+    if not jpeg_bytes:
+        return None
+
+    _save_image_locally(jpeg_bytes, img_url)
+    log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
+
+    # Try catbox.moe (permanent, free, direct URLs ending in .jpg)
+    hosted_url = _upload_to_catbox(jpeg_bytes)
+    if hosted_url:
+        log.info(f"          [IMG] Hosted: {hosted_url}")
+        return hosted_url
+
+    # Try litterbox (temporary 72h, same service)
+    hosted_url = _upload_to_litterbox(jpeg_bytes)
+    if hosted_url:
+        log.info(f"          [IMG] Hosted (temp): {hosted_url}")
+        return hosted_url
+
+    # Try imgbb as fallback
+    try:
+        import base64
+        b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+        resp = http_requests.post(
+            "https://api.imgbb.com/1/upload",
+            data={"key": IMGBB_API_KEY, "image": b64},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            url = data.get("data", {}).get("url", "")
+            if url:
+                log.info(f"          [IMG] imgbb: {url}")
+                return url
+        log.info(f"          [IMG] imgbb response: {resp.status_code}")
+    except Exception as e:
+        log.info(f"          [IMG] imgbb error: {e}")
+
+    # Last resort: use AliExpress CDN URL directly
     if img_url.startswith("https://") and img_url.lower().endswith(('.jpg', '.jpeg', '.png')):
+        log.info(f"          [IMG] Using CDN fallback: {img_url}")
         return img_url
 
     return None
@@ -1364,8 +1453,8 @@ def post_process(csv_path):
         w.writerows(resin_rows)
     log.info("  Saved filtered CSV: %s", filtered_path)
 
-    # --- Step 3: Rehost ALL images via imgbb ---
-    log.info("Step 3: Rehosting images to imgbb (Amazon-compatible JPEG hosting)...")
+    # --- Step 3: Rehost ALL images ---
+    log.info("Step 3: Rehosting images (Amazon-compatible JPEG hosting)...")
     rehosted_count = 0
     failed_count = 0
 
@@ -1439,7 +1528,8 @@ def post_process(csv_path):
         log.info("=" * 60)
         log.info("")
         log.info("BEFORE UPLOADING:")
-        log.info("  1. Make sure GTIN exemption is active (Brand: Generic, no Product ID)")
+        log.info("  1. Make sure GTIN exemption is approved for brand 'Generic' in Toys > Toy Figures category")
+        log.info("     Seller Central > Catalogue > Add Products > 'I need to apply for GTIN exemption'")
         log.info("  2. Upload via Catalogue > Add Products via Upload")
         log.info("  3. Review titles and prices")
         log.info("  4. Brand is set to 'Generic' throughout")
