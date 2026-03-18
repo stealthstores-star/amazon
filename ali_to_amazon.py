@@ -867,7 +867,12 @@ def rehost_image(img_url):
         )
         if resp.status_code == 200:
             data = resp.json()
-            url = data.get("data", {}).get("url", "")
+            # Use display_url or image.url for DIRECT image link
+            # data.url is the viewer page (HTML), not the image itself
+            img_data = data.get("data", {})
+            url = (img_data.get("display_url", "")
+                   or img_data.get("image", {}).get("url", "")
+                   or img_data.get("url", ""))
             if url:
                 log.info(f"          [IMG] imgbb: {url}")
                 return url
@@ -1028,20 +1033,8 @@ def detect_columns(ws):
                 cols[key2] = c
             max_used = max(max_used, c)
 
-    # Ensure required TOY_FIGURE fields exist if missing from template
-    required_extra = [
-        "unit_count", "unit_count_type",
-        "length_height_floor_to_top", "length_height_floor_to_top_unit_of_measure",
-        "length_width_side_to_side", "length_width_side_to_side_unit_of_measure",
-        "length_head_to_toe", "length_head_to_toe_unit_of_measure",
-    ]
-    for field in required_extra:
-        if field not in cols:
-            max_used += 1
-            ws.cell(row=1, column=max_used, value=field)
-            ws.cell(row=2, column=max_used, value=field)
-            ws.cell(row=3, column=max_used, value=field)
-            cols[field] = max_used
+    # Note: Do NOT dynamically add columns — Amazon rejects unknown field headings (error 90061).
+    # Only use columns that already exist in the template.
 
     return cols
 
@@ -1196,6 +1189,32 @@ def fill_amazon_template(template_path, products):
             if c:
                 ws.cell(row=row, column=c, value=sell_price)
 
+            # Price GBP (UK) — also set on parent to avoid "Missing Offer"
+            for field in col_map:
+                if "our_price" in field and "a1f83g8c2aro7p" in field:
+                    ws.cell(row=row, column=col_map[field], value=sell_price)
+                    break
+            c = col("business_price")
+            if c:
+                ws.cell(row=row, column=c, value=sell_price)
+
+            # Fulfillment on parent too
+            c = col("fulfillment_availability#1.fulfillment_channel_code")
+            if c:
+                ws.cell(row=row, column=c, value="DEFAULT")
+            c = col("fulfillment_availability#1.quantity")
+            if c:
+                ws.cell(row=row, column=c, value=QUANTITY)
+            c = col("fulfillment_availability#1.lead_time_to_ship_max_days")
+            if c:
+                ws.cell(row=row, column=c, value=HANDLING_DAYS)
+
+            # Main image on parent row
+            main_img = images[0] if images else ""
+            c = col("main_image_url")
+            if c and main_img:
+                ws.cell(row=row, column=c, value=main_img)
+
             filled += 1
 
             # --- Child rows (one per variation option) ---
@@ -1319,6 +1338,9 @@ def fill_amazon_template(template_path, products):
                 c = col("list_price_with_tax")
                 if c:
                     ws.cell(row=row, column=c, value=sell_price)
+                c = col("business_price")
+                if c:
+                    ws.cell(row=row, column=c, value=sell_price)
 
                 filled += 1
 
@@ -1426,6 +1448,9 @@ def fill_amazon_template(template_path, products):
                     ws.cell(row=row, column=col_map[field], value=sell_price)
                     break
             c = col("list_price_with_tax")
+            if c:
+                ws.cell(row=row, column=c, value=sell_price)
+            c = col("business_price")
             if c:
                 ws.cell(row=row, column=c, value=sell_price)
 
