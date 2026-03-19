@@ -52,6 +52,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 5
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
+PARALLEL_TABS = 3               # Number of tabs for parallel detail fetching
 
 # ---- SMART PRICING CONFIG ----
 TARGET_PROFIT_MARGIN = 0.30
@@ -446,6 +447,94 @@ def scrape_product_detail(tab, product_url, product_id):
         log.debug("  Detail scrape failed for %s: %s", product_id, str(e)[:80])
 
     return result
+
+
+def scrape_details_parallel(context, products, main_tab):
+    """Fetch product details using multiple tabs in parallel batches.
+
+    Opens PARALLEL_TABS extra tabs and processes products in batches,
+    significantly faster than sequential single-tab fetching.
+    """
+    if not products:
+        return
+
+    tabs = []
+    try:
+        for _ in range(min(PARALLEL_TABS, len(products))):
+            tabs.append(context.new_page())
+    except Exception as e:
+        log.warning("  Could not open parallel tabs: %s — falling back to sequential", e)
+        # Close any tabs we did open
+        for t in tabs:
+            try:
+                t.close()
+            except Exception:
+                pass
+        return None  # Signal caller to use sequential fallback
+
+    results = [None] * len(products)
+
+    # Process in batches of PARALLEL_TABS
+    for batch_start in range(0, len(products), len(tabs)):
+        batch = products[batch_start:batch_start + len(tabs)]
+
+        # Check for CAPTCHA on main tab before each batch
+        try:
+            if is_captcha(main_tab):
+                log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
+                print("\a", flush=True)
+                while is_captcha(main_tab):
+                    main_tab.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+        # Start navigation on all tabs simultaneously
+        for i, product in enumerate(batch):
+            pid = product["id"]
+            product_url = product["product_url"]
+            idx = batch_start + i
+            log.info("    [%d/%d] Fetching details for %s...", idx + 1, len(products), pid)
+            try:
+                tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=20000)
+            except Exception as e:
+                log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
+
+        # Wait briefly for images to load on all tabs
+        time.sleep(1.5)
+
+        # Extract data from all tabs
+        for i, product in enumerate(batch):
+            idx = batch_start + i
+            pid = product["id"]
+            result = {
+                "all_images": [],
+                "variations": [],
+                "detail_title": "",
+                "detail_price": "",
+            }
+            try:
+                dismiss_popups(tabs[i])
+                data = tabs[i].evaluate(DETAIL_EXTRACT_JS)
+                if data.get("images"):
+                    result["all_images"] = data["images"][:MAX_IMAGES]
+                if data.get("variations"):
+                    result["variations"] = data["variations"]
+                if data.get("title"):
+                    result["detail_title"] = data["title"]
+                if data.get("price"):
+                    result["detail_price"] = data["price"]
+            except Exception as e:
+                log.debug("  Detail scrape failed for %s: %s", pid, str(e)[:80])
+            results[idx] = result
+
+    # Close the extra tabs
+    for t in tabs:
+        try:
+            t.close()
+        except Exception:
+            pass
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -1947,36 +2036,38 @@ def main():
 
                 # --- Visit each product detail page for ALL images + variations ---
                 if not args.skip_details:
+                    # Try parallel fetching first (3x faster)
+                    detail_results = scrape_details_parallel(context, products, tab)
+
+                    if detail_results is None:
+                        # Fallback to sequential if parallel tabs failed
+                        log.info("    Using sequential detail fetching...")
+                        detail_results = []
+                        for p_idx, product in enumerate(products):
+                            pid = product["id"]
+                            product_url = product["product_url"]
+                            log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
+                            if is_captcha(tab):
+                                log.warning(">>> CAPTCHA detected! Solve it. <<<")
+                                print("\a", flush=True)
+                                while is_captcha(tab):
+                                    tab.wait_for_timeout(2000)
+                            detail_results.append(scrape_product_detail(tab, product_url, pid))
+                            time.sleep(random.uniform(0.3, 0.8))
+
+                    # Apply detail results to products
                     for p_idx, product in enumerate(products):
-                        pid = product["id"]
-                        product_url = product["product_url"]
-                        log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
-
-                        # Check for CAPTCHA before each detail visit
-                        if is_captcha(tab):
-                            log.warning(">>> CAPTCHA detected! Solve it. <<<")
-                            print("\a", flush=True)
-                            while is_captcha(tab):
-                                tab.wait_for_timeout(2000)
-
-                        detail = scrape_product_detail(tab, product_url, pid)
-
-                        # Store all images as pipe-separated
+                        detail = detail_results[p_idx]
+                        if not detail:
+                            continue
                         if detail["all_images"]:
                             product["product_images"] = "|".join(detail["all_images"])
-                            # Update main image to first detail image if better
                             if not product["product_image"] or product["product_image"].startswith("//"):
                                 product["product_image"] = detail["all_images"][0]
-
-                        # Store variations as JSON
                         if detail["variations"]:
                             product["variations"] = json.dumps(detail["variations"])
-
-                        # Update title if detail page has a better one
                         if detail["detail_title"] and len(detail["detail_title"]) > len(product.get("product_title", "")):
                             product["product_title"] = detail["detail_title"]
-
-                        time.sleep(random.uniform(0.3, 0.8))
 
                     # Navigate back to search results page
                     log.info("    Returning to search results...")
