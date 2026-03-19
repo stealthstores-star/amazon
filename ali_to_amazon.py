@@ -52,7 +52,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
-PARALLEL_TABS = 6               # Number of tabs for parallel detail fetching
+PARALLEL_TABS = 3               # Number of tabs for parallel detail fetching
 
 # ---- SMART PRICING CONFIG ----
 TARGET_PROFIT_MARGIN = 0.30
@@ -531,9 +531,11 @@ def scrape_details_parallel(context, products, main_tab):
                 tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=15000)
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
+            # Small delay between tab navigations to reduce rate-limit risk
+            time.sleep(random.uniform(0.3, 0.6))
 
         # Wait briefly for images to load on all tabs
-        time.sleep(0.8)
+        time.sleep(1.0)
 
         # Check if any tab landed on CAPTCHA — if so, handle it and retry
         captcha_tabs = []
@@ -732,21 +734,36 @@ def try_solve_captcha(tab):
     """
     try:
         # --- 1. Google reCAPTCHA checkbox ("I'm not a robot") ---
+        # Only click the checkbox — if an image challenge appears after,
+        # we can't solve it, so return False to let the user handle it.
         for frame in tab.frames:
             try:
                 if "recaptcha" not in frame.url.lower():
                     continue
                 cb = frame.query_selector("#recaptcha-anchor")
                 if cb and cb.is_visible():
+                    # Check if checkbox is already checked
+                    aria = cb.get_attribute("aria-checked")
+                    if aria == "true":
+                        continue
                     log.info("  Auto-clicking reCAPTCHA checkbox...")
                     box = cb.bounding_box()
                     if box:
-                        # Click with slight random offset to look human
                         tab.mouse.click(
                             box["x"] + box["width"] / 2 + random.uniform(-3, 3),
                             box["y"] + box["height"] / 2 + random.uniform(-3, 3),
                         )
-                        tab.wait_for_timeout(2000)
+                        tab.wait_for_timeout(3000)
+                        # Check if an image challenge appeared — if so, we can't solve it
+                        for f in tab.frames:
+                            try:
+                                if "recaptcha" in f.url.lower():
+                                    challenge = f.query_selector(".rc-imageselect, .rc-doscaptcha, .rc-imageselect-table-33")
+                                    if challenge and challenge.is_visible():
+                                        log.info("  Image challenge appeared — need manual solve")
+                                        return False
+                            except Exception:
+                                pass
                         return True
             except Exception:
                 pass
@@ -815,59 +832,36 @@ def handle_captcha(tab):
     if not is_captcha(tab):
         return
 
-    # Ensure CAPTCHA is fully visible — expand viewport and scroll iframe into view
+    # Scroll page to top so CAPTCHA is visible
     try:
-        vp = tab.viewport_size
-        if vp and vp.get("height", 0) < 1400:
-            tab.set_viewport_size({"width": vp.get("width", 1920), "height": 1400})
-    except Exception:
-        pass
-    try:
-        tab.evaluate("""() => {
-            const f = document.querySelector('iframe[src*="recaptcha"], iframe[src*="captcha"], iframe[src*="punch"]');
-            if (f) f.scrollIntoView({block: 'center'});
-            else window.scrollTo(0, 0);
-        }""")
+        tab.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
 
-    # Try auto-solve up to 3 times
+    # Try auto-solve (slider drag, simple button clicks — NOT image challenges)
     auto_att = 0
     while is_captcha(tab) and auto_att < 3:
         if try_solve_captcha(tab):
             auto_att += 1
-            try:
-                tab.reload(wait_until="domcontentloaded", timeout=15000)
-            except Exception:
-                pass
-            tab.wait_for_timeout(1000)
+            tab.wait_for_timeout(2000)
+            # For AliExpress slider/button CAPTCHAs, a reload may help confirm
+            if is_captcha(tab):
+                try:
+                    tab.reload(wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                tab.wait_for_timeout(1000)
         else:
             break
     if not is_captcha(tab):
         log.info("  CAPTCHA auto-solved!")
-        try:
-            tab.set_viewport_size({"width": 1920, "height": 1080})
-        except Exception:
-            pass
         return
-    # Manual solve needed
+    # Manual solve needed — user must solve image challenge or other CAPTCHA
     log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
     print("\a", flush=True)
-    poll_count = 0
     while is_captcha(tab):
-        tab.wait_for_timeout(2000)
-        poll_count += 1
-        if poll_count % 3 == 0:
-            try:
-                tab.reload(wait_until="domcontentloaded", timeout=15000)
-            except Exception:
-                pass
+        tab.wait_for_timeout(3000)
     log.info(">>> CAPTCHA solved! <<<")
-    # Restore normal viewport
-    try:
-        tab.set_viewport_size({"width": 1920, "height": 1080})
-    except Exception:
-        pass
 
 
 def is_login(tab):
@@ -2384,6 +2378,8 @@ def main():
     parser.add_argument("-o", "--output", default=None, help="Output CSV path")
     parser.add_argument("--skip-details", action="store_true",
                         help="Skip visiting individual product pages (faster but only 1 image)")
+    parser.add_argument("--proxy", default=None,
+                        help="Proxy server URL (e.g. http://user:pass@host:port or socks5://host:port)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit total number of products to scrape (0 = no limit)")
     args = parser.parse_args()
@@ -2423,14 +2419,27 @@ def main():
                     browser.close()
             except Exception:
                 pass
-            browser = pw.chromium.launch(
+            launch_kwargs = dict(
                 headless=False,
                 args=["--disable-blink-features=AutomationControlled"],
             )
-            context = browser.new_context(
-                viewport={"width": 1920, "height": 1080},
+            if args.proxy:
+                launch_kwargs["proxy"] = {"server": args.proxy}
+            browser = pw.chromium.launch(**launch_kwargs)
+            ctx_kwargs = dict(
+                viewport={"width": 1280, "height": 800},
                 locale="en-US",
             )
+            if args.proxy and "@" in args.proxy:
+                # Extract user:pass from proxy URL like http://user:pass@host:port
+                from urllib.parse import urlparse as _urlparse
+                _parsed = _urlparse(args.proxy)
+                if _parsed.username:
+                    ctx_kwargs["http_credentials"] = {
+                        "username": _parsed.username,
+                        "password": _parsed.password or "",
+                    }
+            context = browser.new_context(**ctx_kwargs)
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             """)
