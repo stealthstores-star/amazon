@@ -1143,23 +1143,142 @@ def clean_title(title):
     return title
 
 
+def _detect_scale(title):
+    """Extract scale from title like 1/35, 1/64, etc."""
+    m = re.search(r'1/(\d+)', title)
+    return m.group(0) if m else None
+
+
+def _detect_theme(title):
+    """Detect the product theme from title."""
+    t = title.lower()
+    if any(w in t for w in ["wwii", "ww2", "world war", "military", "soldier", "infantry",
+                             "tank crew", "rifleman", "gunner", "paratrooper", "marines"]):
+        return "Military"
+    if any(w in t for w in ["fantasy", "dragon", "elf", "orc", "minotaur", "demon",
+                             "knight", "warrior", "wizard", "monster", "imp"]):
+        return "Fantasy"
+    if any(w in t for w in ["sci-fi", "science fiction", "mecha", "robot", "mars",
+                             "space", "cyberpunk", "futuristic"]):
+        return "Science Fiction"
+    if any(w in t for w in ["anime", "manga", "solo leveling", "collectible model"]):
+        return "Anime"
+    if any(w in t for w in ["christmas", "decoration", "ornament", "garden", "landscape"]):
+        return "Decorative"
+    if any(w in t for w in ["football", "soccer", "sport"]):
+        return "Sports"
+    if any(w in t for w in ["historical", "centurion", "roman", "napoleonic", "civil war",
+                             "medieval", "templar", "crusade", "regiment"]):
+        return "Historical"
+    if any(w in t for w in ["diorama", "miniature", "scene", "street", "garage", "city"]):
+        return "Diorama"
+    if any(w in t for w in ["pilot", "air force", "spitfire", "fighter"]):
+        return "Aviation"
+    return "Collectible Figures"
+
+
+def _detect_figure_type(title):
+    """Detect toy figure type from title."""
+    t = title.lower()
+    if any(w in t for w in ["bust", "1/10", "1/9", "1/12 bust"]):
+        return "Busts"
+    if any(w in t for w in ["diorama", "scene", "landscape", "miniature figure"]):
+        return "Miniatures"
+    if any(w in t for w in ["soldier", "infantry", "military", "tank crew", "rifleman",
+                             "gunner", "pilot", "marines"]):
+        return "Soldier Figures"
+    if any(w in t for w in ["statue", "collectible", "anime"]):
+        return "Statues"
+    if any(w in t for w in ["animal", "dog", "cat", "horse", "fox", "christmas"]):
+        return "Animal Figures"
+    return "Action Figures"
+
+
+def _detect_animal(title):
+    """Detect animal type if present in title."""
+    t = title.lower()
+    animals = {
+        "dragon": "Dragon", "horse": "Horse", "dog": "Dog", "cat": "Cat",
+        "fox": "Fox", "wolf": "Wolf", "eagle": "Eagle", "lion": "Lion",
+        "bear": "Bear", "dinosaur": "Dinosaur", "scorpion": "Scorpion",
+        "mouse": "Mouse", "bull": "Bull", "minotaur": "Bull",
+    }
+    for keyword, animal in animals.items():
+        if keyword in t:
+            return animal
+    return None
+
+
+def _detect_material(title):
+    """Detect material from title."""
+    t = title.lower()
+    if "resin" in t:
+        return "Resin"
+    if "metal" in t or "die-cast" in t or "diecast" in t:
+        return "Metal"
+    if "plastic" in t or "pvc" in t:
+        return "Plastic"
+    return "Resin"
+
+
+def _detect_num_pieces(title):
+    """Try to detect number of pieces/figures from title."""
+    t = title.lower()
+    # "5 soldiers", "3 people", "10 people", "4 figure", "15 figure"
+    m = re.search(r'(\d+)\s*(?:people|soldiers|figures?|pieces?|men|person)', t)
+    if m:
+        return int(m.group(1))
+    # "set of 3", "pack of 5"
+    m = re.search(r'(?:set|pack|kit)\s*(?:of\s*)?(\d+)', t)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
 def make_bullets(title):
+    """Generate product-specific bullet points based on title analysis."""
     bullets = []
     text = title.lower()
-    if "resin" in text:
-        bullets.append("Resin model kit suitable for hobbyists and collectors")
-    if "build" in text or "block" in text or "moc" in text:
-        bullets.append("Building blocks set with detailed design")
-    if any(w in text for w in ["1/6", "1/8", "1/10", "1/12", "1/24", "1/35", "scale"]):
-        bullets.append("Scale model with detailed features")
+    scale = _detect_scale(title)
+    theme = _detect_theme(title)
+    material = _detect_material(title)
+    num = _detect_num_pieces(title)
+
+    # Material-specific
+    if material == "Resin":
+        bullets.append(f"Premium quality resin model kit with fine detail casting for painting and display")
+    elif material == "Metal":
+        bullets.append(f"Die-cast metal construction for durability and realistic weight")
+
+    # Scale-specific
+    if scale:
+        bullets.append(f"Accurately proportioned {scale} scale model compatible with other {scale} scale collections")
+
+    # Theme-specific
+    if "Military" in theme or "Aviation" in theme:
+        bullets.append("Historically inspired design based on real military reference material")
+    elif "Fantasy" in theme:
+        bullets.append("Richly detailed fantasy design perfect for tabletop gaming or display shelves")
+    elif "Diorama" in theme:
+        bullets.append("Ideal for creating realistic diorama scenes and miniature displays")
+
+    # Kit features
     if "unpainted" in text or "unassembled" in text:
-        bullets.append("Unpainted kit for experienced modellers")
+        bullets.append("Unassembled and unpainted kit allowing full creative customisation")
+    if "bust" in text:
+        bullets.append("Detailed bust format showcasing intricate facial and upper body features")
+
+    # Quantity
+    if num > 1:
+        bullets.append(f"Includes {num} individual figures in one complete set")
+
+    # Fill remaining with quality-focused generics
     generic = [
-        "Suitable for display or collection purposes",
-        "Model kit for hobbyists",
-        "Packaged securely for delivery",
-        "Suitable for adults and older children",
-        "Detailed design for model enthusiasts",
+        f"Made from high-quality {material.lower()} material for lasting display quality",
+        "Perfect collectible gift for model enthusiasts, hobbyists and painters",
+        "Securely packaged to ensure safe delivery of all parts and components",
+        "Suitable for experienced modellers and collectors aged 14 and above",
+        "Excellent addition to any scale model or miniature figure collection",
     ]
     for g in generic:
         if len(bullets) >= 5:
@@ -1170,13 +1289,48 @@ def make_bullets(title):
 
 
 def make_description(title):
-    return (
-        clean_title(title) + ". "
-        "This item makes an excellent addition to any model collection or display. "
-        "Carefully crafted with attention to detail. "
-        "Perfect as a gift or for personal enjoyment. "
-        "Please check the images for full product details and specifications."
-    )
+    """Generate a detailed, product-specific Amazon description."""
+    clean = clean_title(title)
+    text = title.lower()
+    scale = _detect_scale(title)
+    theme = _detect_theme(title)
+    material = _detect_material(title)
+    num = _detect_num_pieces(title)
+
+    parts = [clean + "."]
+
+    # Opening based on theme
+    if "Military" in theme:
+        parts.append(f"This {material.lower()} model kit captures the detail and character of military history.")
+    elif "Fantasy" in theme:
+        parts.append(f"This {material.lower()} fantasy model kit features intricate sculpting and dynamic posing.")
+    elif "Diorama" in theme:
+        parts.append(f"These miniature figures are perfect for creating vivid, lifelike diorama scenes.")
+    elif "Historical" in theme:
+        parts.append(f"This historically inspired {material.lower()} figure captures the period with authentic detail.")
+    elif "Anime" in theme:
+        parts.append(f"This premium {material.lower()} collectible statue features high-quality sculpting and finish.")
+    elif "Sports" in theme:
+        parts.append(f"A fun and detailed collectible figure for sports fans and figure collectors alike.")
+    else:
+        parts.append(f"This {material.lower()} model kit features carefully sculpted details for an impressive display piece.")
+
+    # Scale info
+    if scale:
+        parts.append(f"Built to {scale} scale, this model is compatible with other figures and accessories in the same scale range.")
+
+    # Kit details
+    if "unpainted" in text or "unassembled" in text:
+        parts.append("Supplied unassembled and unpainted, giving you complete freedom to bring this model to life with your own colour scheme and finishing techniques.")
+    if num > 1:
+        parts.append(f"This set includes {num} individual figures, each with their own unique pose and character detail.")
+
+    # Closing
+    parts.append(f"Crafted from high-quality {material.lower()} for sharp detail and durability.")
+    parts.append("An excellent choice for collectors, painters, and hobbyists looking for their next project or display piece.")
+    parts.append("Please refer to the product images for a detailed view of the model and its features.")
+
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -1230,6 +1384,94 @@ def _fill_toy_figure_fields(ws, row, col):
         c = col(field)
         if c:
             ws.cell(row=row, column=c, value=value)
+
+
+def _fill_quality_attributes(ws, row, col, title):
+    """Fill quality listing attributes: theme, material, figure type, age range, etc."""
+    theme = _detect_theme(title)
+    figure_type = _detect_figure_type(title)
+    material = _detect_material(title)
+    animal = _detect_animal(title)
+    num_pieces = _detect_num_pieces(title)
+    scale = _detect_scale(title)
+
+    # Theme (subject)
+    c = col("theme")
+    if c:
+        ws.cell(row=row, column=c, value=theme)
+
+    # Material
+    c = col("material_type")
+    if c:
+        ws.cell(row=row, column=c, value=material)
+
+    # Age range
+    c = col("age_range_description")
+    if c:
+        ws.cell(row=row, column=c, value="14 years and up")
+
+    # Target gender
+    c = col("target_gender")
+    if c:
+        ws.cell(row=row, column=c, value="Unisex")
+
+    # Skill level
+    c = col("skill_level")
+    if c:
+        if "unpainted" in title.lower() or "unassembled" in title.lower():
+            ws.cell(row=row, column=c, value="Advanced")
+        else:
+            ws.cell(row=row, column=c, value="Intermediate")
+
+    # Number of pieces
+    c = col("number_of_pieces")
+    if c:
+        ws.cell(row=row, column=c, value=num_pieces)
+
+    # Scale (if detected)
+    if scale:
+        c = col("scale_name")
+        if c:
+            ws.cell(row=row, column=c, value=scale)
+
+    # Item type name
+    c = col("item_type_name")
+    if c:
+        ws.cell(row=row, column=c, value=figure_type)
+
+    # Style
+    c = col("style_name")
+    if c:
+        if "bust" in title.lower():
+            ws.cell(row=row, column=c, value="Bust")
+        elif "diorama" in title.lower():
+            ws.cell(row=row, column=c, value="Diorama")
+        else:
+            ws.cell(row=row, column=c, value="Figure")
+
+    # Special features
+    special = []
+    t = title.lower()
+    if "unpainted" in t:
+        special.append("Unpainted")
+    if "unassembled" in t:
+        special.append("Unassembled")
+    if "resin" in t:
+        special.append("Resin Cast")
+    if scale:
+        special.append(f"{scale} Scale")
+    if "hand" in t or "handmade" in t:
+        special.append("Handcrafted")
+    for i, feat in enumerate(special[:5]):
+        c = col(f"special_features{i+1}")
+        if c:
+            ws.cell(row=row, column=c, value=feat)
+
+    # Subject (animal theme if applicable)
+    if animal:
+        c = col("unknown_subject")  # 'subject' field in template
+        if c:
+            ws.cell(row=row, column=c, value=animal)
 
 
 def _fill_offer_fields(ws, row, col, col_map, sell_price):
@@ -1400,6 +1642,7 @@ def fill_amazon_template(template_path, products):
             if c:
                 ws.cell(row=row, column=c, value="No")
             _fill_toy_figure_fields(ws, row, col)
+            _fill_quality_attributes(ws, row, col, title)
             _fill_offer_fields(ws, row, col, col_map, sell_price)
 
             # Main image on parent row
@@ -1508,6 +1751,7 @@ def fill_amazon_template(template_path, products):
                 if c:
                     ws.cell(row=row, column=c, value="No")
                 _fill_toy_figure_fields(ws, row, col)
+                _fill_quality_attributes(ws, row, col, title)
                 _fill_offer_fields(ws, row, col, col_map, sell_price)
 
                 filled += 1
@@ -1595,6 +1839,7 @@ def fill_amazon_template(template_path, products):
             if c:
                 ws.cell(row=row, column=c, value="No")
             _fill_toy_figure_fields(ws, row, col)
+            _fill_quality_attributes(ws, row, col, title)
             _fill_offer_fields(ws, row, col, col_map, sell_price)
 
             filled += 1
