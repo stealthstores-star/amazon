@@ -2018,7 +2018,14 @@ def main():
             pg = 1
             while pg <= MAX_PAGES:
                 log.info("  Page %d", pg)
-                wait_ready(tab, url)
+                # Build page-specific URL so CAPTCHA recovery returns to correct page
+                page_url = sort_by_orders(url)
+                if pg > 1:
+                    parsed = urlparse(page_url)
+                    qs = parse_qs(parsed.query, keep_blank_values=True)
+                    qs["page"] = [str(pg)]
+                    page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+                wait_ready(tab, page_url)
                 dismiss_popups(tab)
                 products = scroll_and_extract(tab)
 
