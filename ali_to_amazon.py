@@ -65,35 +65,71 @@ MIN_SELL_PRICE = 5.99
 # ---- IMAGE HOSTING ----
 IMGBB_API_KEY = "dd9a3b6ab5cabf1a45a24736ffe29e42"
 
-# Keywords for resin model filtering
+# Keywords for resin model filtering — STRICT: only resin figures, busts, dioramas
+# The product MUST match at least one INCLUDE term AND not match any EXCLUDE term.
+# Additionally, products matching SOFT_INCLUDE still require "resin" somewhere in the title.
 RESIN_INCLUDE = [
-    "resin", "model kit", "model figure", "figure kit", "garage kit",
-    "gk kit", "unpainted", "unassembled", "1/6 scale", "1/8 scale",
-    "1/10 scale", "1/12 scale", "1/24 scale", "1/35 scale",
-    "statue kit", "bust kit", "diorama", "miniature figure",
-    "scale model", "resin cast", "resin figure", "resin statue",
-    "moc", "building block", "micro block", "brick set", "brick model",
-    "nano block", "diamond block", "mini block", "architecture model",
-    "military model", "tank model", "ship model", "airplane model",
-    "car model kit", "gundam", "mecha", "robot model",
+    # Primary — these are strong enough signals on their own
+    "resin model", "resin figure", "resin statue", "resin bust",
+    "resin kit", "resin cast", "resin diorama",
+    "garage kit", "gk kit", "gk,",
+    "unpainted kit", "unassembled kit",
+    "miniature figure", "miniature figurine",
+]
+
+RESIN_SOFT_INCLUDE = [
+    # These only count if "resin" is ALSO in the title
+    "model figure", "figure kit", "model kit",
+    "bust kit", "statue kit", "diorama",
+    "unpainted", "unassembled",
+    "1/6", "1/8", "1/9", "1/10", "1/12", "1/16",
+    "1/24", "1/32", "1/35", "1/43", "1/64", "1/72",
+    "1/87", "1/100", "1/144",
+    "scale model", "scale figure",
+    "soldier figure", "military figure",
+    "fantasy figure", "wargame", "wargaming",
+    "tabletop", "miniature",
 ]
 
 RESIN_EXCLUDE = [
+    # Electronics / accessories
     "phone case", "screen protector", "earphone", "headphone",
-    "charger", "cable", "adapter", "usb", "bluetooth",
-    "clothing", "shirt", "dress", "pants", "shoe", "sock",
+    "charger", "cable", "adapter", "usb", "bluetooth", "led light",
+    # Clothing
+    "clothing", "shirt", "dress", "pants", "shoe", "sock", "costume",
+    # Food / health
     "food", "snack", "drink", "supplement", "vitamin",
+    # Cosmetics
     "cosmetic", "makeup", "skincare", "perfume", "shampoo",
+    # Pet
     "pet food", "dog food", "cat food",
-    "sticker", "decal only", "poster", "wall art",
+    # Non-resin crafts
+    "sticker", "decal only", "poster", "wall art", "painting",
     "silicone mold", "silicone mould", "candle mold",
     "jewelry mold", "epoxy mold", "soap mold",
-    "resin art supply", "resin pigment", "resin dye",
+    "resin art supply", "resin pigment", "resin dye", "resin glue",
+    "uv resin", "epoxy resin", "resin coaster", "resin tray",
+    "resin jewelry", "resin earring", "resin necklace", "resin ring",
+    "resin keychain", "resin bookmark",
+    # Branded vehicles (IP risk)
     "jeep", "ford", "toyota", "bmw", "mercedes", "audi",
     "ferrari", "lamborghini", "porsche", "tesla", "honda",
+    "chevrolet", "volkswagen", "nissan", "subaru",
+    # Branded IP (takedown risk)
     "marvel", "disney", "star wars", "pokemon", "transformers",
     "warhammer", "games workshop", "bandai", "kotobukiya", "hasbro",
     "funko", "lego", "nike", "adidas", "supreme",
+    "dragon ball", "naruto", "one piece", "demon slayer",
+    "gundam", "gunpla",
+    # Non-resin model types
+    "building block", "brick set", "brick model", "nano block",
+    "micro block", "diamond block", "mini block", "moc set",
+    "plastic model", "plastic kit", "injection kit",
+    "die cast", "diecast", "die-cast", "metal car",
+    "rc car", "remote control", "radio control",
+    "plush", "stuffed", "soft toy", "puzzle", "jigsaw",
+    "board game", "card game", "trading card",
+    "3d print file", "stl file", "digital download",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1040,13 +1076,21 @@ def rehost_image(img_url):
 # Post-processing helpers
 # ---------------------------------------------------------------------------
 def is_resin_model(title):
+    """Strict filter: only accept genuine resin models, figures, busts, dioramas."""
     t = title.lower()
+    # Exclusions always win
     for ex in RESIN_EXCLUDE:
         if ex in t:
             return False
+    # Strong include — these terms are specific enough on their own
     for inc in RESIN_INCLUDE:
         if inc in t:
             return True
+    # Soft include — only if "resin" is also in the title
+    if "resin" in t:
+        for inc in RESIN_SOFT_INCLUDE:
+            if inc in t:
+                return True
     return False
 
 
@@ -2369,20 +2413,6 @@ def main():
                         if detail["detail_title"] and len(detail["detail_title"]) > len(product.get("product_title", "")):
                             product["product_title"] = detail["detail_title"]
 
-                    # Navigate back to search results page
-                    log.info("    Returning to search results...")
-                    try:
-                        current_page_url = sort_by_orders(url)
-                        if pg > 1:
-                            parsed = urlparse(current_page_url)
-                            qs = parse_qs(parsed.query, keep_blank_values=True)
-                            qs["page"] = [str(pg)]
-                            current_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
-                        tab.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
-                        tab.wait_for_selector("a[href*='/item/']", timeout=5000)
-                    except Exception:
-                        pass
-
                 prev_total = csv_out.count
                 csv_out.add(products, url)
                 new_count = csv_out.count - prev_total
@@ -2392,21 +2422,36 @@ def main():
                     log.info("  Reached product limit (%d). Stopping.", args.limit)
                     break
 
-                if new_count == 0 and pg > 1:
+                if new_count == 0 and pg > 2:
                     log.info("  No new products — done with this URL.")
                     break
 
-                if not click_next(tab, pg):
-                    log.info("  No next page — done.")
-                    break
-
-                try:
-                    tab.wait_for_selector("a[href*='/item/']", timeout=5000)
-                except Exception:
-                    pass
-
+                # Navigate to next page via direct URL (most reliable)
                 pg += 1
-                time.sleep(random.uniform(0.2, 0.5))
+                next_page_url = sort_by_orders(url)
+                parsed = urlparse(next_page_url)
+                qs = parse_qs(parsed.query, keep_blank_values=True)
+                qs["page"] = [str(pg)]
+                next_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+                log.info("  Navigating to page %d...", pg)
+                try:
+                    tab.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
+                    tab.wait_for_selector("a[href*='/item/']", timeout=8000)
+                except Exception:
+                    # If direct navigation fails, try click_next as fallback
+                    log.info("  Direct nav failed, trying click_next...")
+                    try:
+                        tab.go_back(wait_until="domcontentloaded", timeout=15000)
+                        tab.wait_for_timeout(1000)
+                        if not click_next(tab, pg - 1):
+                            log.info("  No next page — done.")
+                            break
+                        tab.wait_for_selector("a[href*='/item/']", timeout=5000)
+                    except Exception:
+                        log.info("  Could not reach page %d — done.", pg)
+                        break
+
+                time.sleep(random.uniform(0.3, 0.8))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
