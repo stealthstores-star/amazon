@@ -50,7 +50,7 @@ PRODUCT_TYPE = "toyfigure"
 BRAND = "Generic"
 HANDLING_DAYS = 7
 QUANTITY = 5
-MAX_PAGES = 5
+MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
 PARALLEL_TABS = 3               # Number of tabs for parallel detail fetching
 
