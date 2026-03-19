@@ -54,6 +54,20 @@ MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
 PARALLEL_TABS = 3               # Number of tabs for parallel detail fetching
 
+# SOCKS5 proxy pool — rotated per URL to spread traffic
+PROXY_POOL = [
+    {
+        "server": "socks5://165.49.88.29:11000",
+        "username": "nodemavenJstTb",
+        "password": "ROr1Sg4IVXzs",
+    },
+    {
+        "server": "socks5://78.24.126.8:12324",
+        "username": "14ae8bf2e23dd",
+        "password": "77c507a188",
+    },
+]
+
 # ---- SMART PRICING CONFIG ----
 TARGET_PROFIT_MARGIN = 0.30
 AMAZON_REFERRAL_FEE = 0.1545
@@ -679,6 +693,19 @@ def click_next(tab, current):
     return False
 
 
+def is_blocked(tab):
+    """Check if AliExpress is showing 'unusual traffic' / IP block page."""
+    try:
+        body = tab.query_selector("body")
+        if body:
+            text = (body.inner_text() or "").strip().lower()
+            if len(text) < 500 and ("unusual traffic" in text or "try again later" in text):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 # ---------------------------------------------------------------------------
 # CAPTCHA / Login detection
 # ---------------------------------------------------------------------------
@@ -721,7 +748,8 @@ def is_captcha(tab):
                 low = text.lower()
                 if any(w in low for w in ["captcha", "verify you are human", "robot",
                                           "slide to verify", "puzzle", "drag the slider",
-                                          "not a robot", "check if you are"]):
+                                          "not a robot", "check if you are",
+                                          "unusual traffic", "try again later"]):
                     return True
     except Exception:
         pass
@@ -2395,19 +2423,37 @@ def main():
     csv_out = LiveCSV(out)
     log.info("Output: %s", out)
 
+    proxy_index = [0]  # mutable so nested functions can update it
+
+    def get_proxy_config():
+        """Get the current proxy config from pool, --proxy flag, or None."""
+        if args.proxy:
+            return {"server": args.proxy}
+        if PROXY_POOL:
+            return PROXY_POOL[proxy_index[0] % len(PROXY_POOL)]
+        return None
+
+    def rotate_proxy():
+        """Switch to the next proxy in the pool."""
+        if PROXY_POOL and not args.proxy:
+            proxy_index[0] += 1
+            p = get_proxy_config()
+            log.info("  Rotated to proxy: %s", p["server"])
+
     with sync_playwright() as pw:
         browser = None
         context = None
         tab = None
 
-        def ensure_browser():
+        def ensure_browser(force_new=False):
             nonlocal browser, context, tab
-            try:
-                if tab:
-                    tab.url
-                    return
-            except Exception:
-                pass
+            if not force_new:
+                try:
+                    if tab:
+                        tab.url
+                        return
+                except Exception:
+                    pass
             log.info("Opening browser...")
             try:
                 if context:
@@ -2423,22 +2469,21 @@ def main():
                 headless=False,
                 args=["--disable-blink-features=AutomationControlled"],
             )
-            if args.proxy:
-                launch_kwargs["proxy"] = {"server": args.proxy}
+            proxy = get_proxy_config()
+            if proxy:
+                launch_kwargs["proxy"] = {"server": proxy["server"]}
             browser = pw.chromium.launch(**launch_kwargs)
             ctx_kwargs = dict(
                 viewport={"width": 1280, "height": 800},
                 locale="en-US",
             )
-            if args.proxy and "@" in args.proxy:
-                # Extract user:pass from proxy URL like http://user:pass@host:port
-                from urllib.parse import urlparse as _urlparse
-                _parsed = _urlparse(args.proxy)
-                if _parsed.username:
-                    ctx_kwargs["http_credentials"] = {
-                        "username": _parsed.username,
-                        "password": _parsed.password or "",
-                    }
+            if proxy and proxy.get("username"):
+                ctx_kwargs["http_credentials"] = {
+                    "username": proxy["username"],
+                    "password": proxy.get("password", ""),
+                }
+            if proxy:
+                log.info("  Using proxy: %s", proxy["server"])
             context = browser.new_context(**ctx_kwargs)
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -2558,6 +2603,19 @@ def main():
                     except Exception:
                         log.warning("  Load error: %s", e)
                         continue
+
+            # Check for IP block after initial page load
+            if is_blocked(tab) and PROXY_POOL:
+                log.warning("  IP blocked — rotating proxy and retrying...")
+                rotate_proxy()
+                ensure_browser(force_new=True)
+                try:
+                    tab.goto(url, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                if is_blocked(tab):
+                    log.warning("  Still blocked after proxy rotation — skipping URL")
+                    continue
 
             pg = 1
             while pg <= MAX_PAGES:
