@@ -52,7 +52,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
-PARALLEL_TABS = 3               # Number of tabs for parallel detail fetching
+PARALLEL_TABS = 6               # Number of tabs for parallel detail fetching
 
 # ---- SMART PRICING CONFIG ----
 TARGET_PROFIT_MARGIN = 0.30
@@ -457,13 +457,12 @@ def scrape_product_detail(tab, product_url, product_id):
     }
 
     try:
-        tab.goto(product_url, wait_until="domcontentloaded", timeout=20000)
+        tab.goto(product_url, wait_until="domcontentloaded", timeout=15000)
         # Wait for images to load
         try:
-            tab.wait_for_selector('img[src*="alicdn"]', timeout=5000)
+            tab.wait_for_selector('img[src*="alicdn"]', timeout=3000)
         except Exception:
             pass
-        time.sleep(1)  # Let lazy images load
 
         # Dismiss any popups
         dismiss_popups(tab)
@@ -516,11 +515,7 @@ def scrape_details_parallel(context, products, main_tab):
 
         # Check for CAPTCHA on main tab before each batch
         try:
-            if is_captcha(main_tab):
-                log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
-                print("\a", flush=True)
-                while is_captcha(main_tab):
-                    main_tab.wait_for_timeout(2000)
+            handle_captcha(main_tab)
         except Exception:
             pass
 
@@ -536,7 +531,7 @@ def scrape_details_parallel(context, products, main_tab):
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
 
         # Wait briefly for images to load on all tabs
-        time.sleep(1.5)
+        time.sleep(0.8)
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -694,6 +689,124 @@ def is_captcha(tab):
     return False
 
 
+def try_solve_captcha(tab):
+    """Attempt to auto-solve simple CAPTCHAs (checkbox click, slider drag).
+    Returns True if it attempted a solve (caller should re-check is_captcha).
+    """
+    try:
+        # --- 1. Google reCAPTCHA checkbox ("I'm not a robot") ---
+        for frame in tab.frames:
+            try:
+                if "recaptcha" not in frame.url.lower():
+                    continue
+                cb = frame.query_selector("#recaptcha-anchor")
+                if cb and cb.is_visible():
+                    log.info("  Auto-clicking reCAPTCHA checkbox...")
+                    box = cb.bounding_box()
+                    if box:
+                        # Click with slight random offset to look human
+                        tab.mouse.click(
+                            box["x"] + box["width"] / 2 + random.uniform(-3, 3),
+                            box["y"] + box["height"] / 2 + random.uniform(-3, 3),
+                        )
+                        tab.wait_for_timeout(2000)
+                        return True
+            except Exception:
+                pass
+
+        # --- 2. AliExpress slide-to-verify (drag slider to the right) ---
+        for sel in ["#nc_1_n1z", ".nc_iconfont.btn_slide", "[class*='slider'] button",
+                     "[class*='slide-btn']", ".btn_slide", "#nc_1__scale_text",
+                     "[class*='SliderCaptcha'] .slider-btn"]:
+            try:
+                slider = tab.query_selector(sel)
+                if slider and slider.is_visible():
+                    log.info("  Auto-dragging slider CAPTCHA...")
+                    box = slider.bounding_box()
+                    if box:
+                        # Find the track/container width
+                        track_width = tab.evaluate("""
+                        () => {
+                            const t = document.querySelector('#nc_1_wrapper, [class*="slider-track"], [class*="nc-container"], [class*="SliderCaptcha"]');
+                            return t ? t.getBoundingClientRect().width : 600;
+                        }
+                        """)
+                        start_x = box["x"] + box["width"] / 2
+                        start_y = box["y"] + box["height"] / 2
+                        end_x = start_x + track_width - box["width"]
+
+                        # Simulate human-like drag
+                        tab.mouse.move(start_x, start_y)
+                        tab.mouse.down()
+                        steps = random.randint(15, 25)
+                        for s in range(1, steps + 1):
+                            progress = s / steps
+                            # Ease-out curve
+                            ease = 1 - (1 - progress) ** 2
+                            cx = start_x + (end_x - start_x) * ease + random.uniform(-1, 1)
+                            cy = start_y + random.uniform(-2, 2)
+                            tab.mouse.move(cx, cy)
+                            tab.wait_for_timeout(random.randint(10, 30))
+                        tab.mouse.move(end_x, start_y)
+                        tab.mouse.up()
+                        tab.wait_for_timeout(2000)
+                        return True
+            except Exception:
+                pass
+
+        # --- 3. Simple "click to verify" / "press and hold" button ---
+        for sel in ["button:has-text('Verify')", "button:has-text('verify')",
+                     "button:has-text('Continue')", "[class*='captcha'] button",
+                     "button:has-text('I\\'m not a robot')"]:
+            try:
+                btn = tab.query_selector(sel)
+                if btn and btn.is_visible():
+                    log.info("  Auto-clicking verify button...")
+                    btn.click()
+                    tab.wait_for_timeout(2000)
+                    return True
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+    return False
+
+
+def handle_captcha(tab):
+    """Auto-solve CAPTCHA if possible, otherwise wait for user. Returns when clear."""
+    if not is_captcha(tab):
+        return
+    # Try auto-solve up to 3 times
+    auto_att = 0
+    while is_captcha(tab) and auto_att < 3:
+        if try_solve_captcha(tab):
+            auto_att += 1
+            try:
+                tab.reload(wait_until="domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            tab.wait_for_timeout(1000)
+        else:
+            break
+    if not is_captcha(tab):
+        log.info("  CAPTCHA auto-solved!")
+        return
+    # Manual solve needed
+    log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
+    print("\a", flush=True)
+    poll_count = 0
+    while is_captcha(tab):
+        tab.wait_for_timeout(2000)
+        poll_count += 1
+        if poll_count % 3 == 0:
+            try:
+                tab.reload(wait_until="domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+    log.info(">>> CAPTCHA solved! <<<")
+
+
 def is_login(tab):
     try:
         url = tab.url.lower()
@@ -735,10 +848,33 @@ def wait_ready(tab, target):
                 pass
             continue
         if is_captcha(tab):
-            log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
-            print("\a", flush=True)
-            while is_captcha(tab):
-                tab.wait_for_timeout(2000)
+            # Try auto-solve first (checkbox, slider, button)
+            auto_attempts = 0
+            while is_captcha(tab) and auto_attempts < 3:
+                if try_solve_captcha(tab):
+                    auto_attempts += 1
+                    # Reload to check if solve worked
+                    try:
+                        tab.reload(wait_until="domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
+                    tab.wait_for_timeout(1000)
+                else:
+                    break
+            if is_captcha(tab):
+                # Auto-solve failed — ask user (do NOT reload while they solve)
+                log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
+                print("\a", flush=True)
+                poll_count = 0
+                while is_captcha(tab):
+                    tab.wait_for_timeout(2000)
+                    poll_count += 1
+                    # Periodically reload to detect the solve
+                    if poll_count % 3 == 0:
+                        try:
+                            tab.reload(wait_until="domcontentloaded", timeout=15000)
+                        except Exception:
+                            pass
             log.info(">>> CAPTCHA solved! Reloading target... <<<")
             try:
                 tab.goto(target, wait_until="domcontentloaded", timeout=30000)
@@ -764,18 +900,18 @@ def dismiss_popups(tab):
 
 SCROLL_JS = """
 async () => {
-    const step = window.innerHeight;
+    const step = window.innerHeight * 2;
     const delay = ms => new Promise(r => setTimeout(r, ms));
     let h = document.body.scrollHeight;
     let y = 0;
     while (y < h) {
         y += step;
         window.scrollTo(0, y);
-        await delay(150);
+        await delay(80);
         h = document.body.scrollHeight;
     }
     window.scrollTo(0, document.body.scrollHeight);
-    await delay(300);
+    await delay(150);
 }
 """
 
@@ -790,7 +926,7 @@ def scroll_and_extract(tab):
     while stale < 2:
         try:
             tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            tab.wait_for_timeout(500)
+            tab.wait_for_timeout(300)
         except Exception:
             break
         new = extract(tab)
@@ -801,7 +937,6 @@ def scroll_and_extract(tab):
             stale += 1
     try:
         tab.evaluate("window.scrollTo(0, 0)")
-        tab.wait_for_timeout(100)
     except Exception:
         pass
     return products
@@ -2340,11 +2475,7 @@ def main():
                 else:
                     try:
                         if is_captcha(tab):
-                            log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
-                            print("\a", flush=True)
-                            while is_captcha(tab):
-                                tab.wait_for_timeout(2000)
-                            log.info(">>> CAPTCHA solved! Reloading... <<<")
+                            handle_captcha(tab)
                             try:
                                 tab.goto(url, wait_until="domcontentloaded", timeout=30000)
                             except Exception:
@@ -2395,13 +2526,9 @@ def main():
                             pid = product["id"]
                             product_url = product["product_url"]
                             log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
-                            if is_captcha(tab):
-                                log.warning(">>> CAPTCHA detected! Solve it. <<<")
-                                print("\a", flush=True)
-                                while is_captcha(tab):
-                                    tab.wait_for_timeout(2000)
+                            handle_captcha(tab)
                             detail_results.append(scrape_product_detail(tab, product_url, pid))
-                            time.sleep(random.uniform(0.3, 0.8))
+                            time.sleep(random.uniform(0.1, 0.3))
 
                     # Apply detail results to products
                     for p_idx, product in enumerate(products):
@@ -2462,7 +2589,7 @@ def main():
                         log.info("  Could not reach page %d — done.", pg)
                         break
 
-                time.sleep(random.uniform(0.3, 0.8))
+                time.sleep(random.uniform(0.1, 0.3))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
