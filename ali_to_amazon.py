@@ -2690,23 +2690,16 @@ def main():
                     products = products[:remaining]
 
                 # --- Visit each product detail page for ALL images + variations ---
-                used_sequential = False
+                used_sequential = True
                 if not args.skip_details:
-                    # Try parallel fetching first (3x faster)
-                    detail_results = scrape_details_parallel(context, products, tab)
-
-                    if detail_results is None:
-                        # Fallback to sequential if parallel tabs failed
-                        used_sequential = True
-                        log.info("    Using sequential detail fetching...")
-                        detail_results = []
-                        for p_idx, product in enumerate(products):
-                            pid = product["id"]
-                            product_url = product["product_url"]
-                            log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
-                            handle_captcha(tab)
-                            detail_results.append(scrape_product_detail(tab, product_url, pid))
-                            time.sleep(random.uniform(0.3, 0.6))
+                    detail_results = []
+                    for p_idx, product in enumerate(products):
+                        pid = product["id"]
+                        product_url = product["product_url"]
+                        log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
+                        handle_captcha(tab)
+                        detail_results.append(scrape_product_detail(tab, product_url, pid))
+                        time.sleep(random.uniform(0.2, 0.4))
 
                     # Apply detail results to products
                     for p_idx, product in enumerate(products):
