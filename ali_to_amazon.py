@@ -896,8 +896,10 @@ def rehost_image(img_url):
         if resp.status_code == 200:
             data = resp.json()
             img_data = data.get("data", {})
-            url = (img_data.get("display_url", "")
-                   or img_data.get("image", {}).get("url", "")
+            # IMPORTANT: use image.url (full-size original), NOT display_url
+            # display_url is a 640px thumbnail which fails Amazon's 1000px minimum
+            url = (img_data.get("image", {}).get("url", "")
+                   or img_data.get("display_url", "")
                    or img_data.get("url", ""))
             if url:
                 log.info(f"          [IMG] imgbb: {url}")
