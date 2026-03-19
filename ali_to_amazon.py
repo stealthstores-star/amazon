@@ -48,7 +48,7 @@ DEFAULT_PRICE_GBP = 12.99
 BROWSE_NODE = "364155031"       # Amazon UK: Action & Toy Figures
 PRODUCT_TYPE = "toyfigure"
 BRAND = "Generic"
-HANDLING_DAYS = 8
+HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 5
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
@@ -1032,12 +1032,13 @@ def clean_title(title):
     # Remove ALL prohibited Amazon phrases (case insensitive)
     prohibited = [
         r'free\s*shipping', r'best\s*seller', r'hot\s*sale',
-        r'new\s*arrival', r'wholesale', r'dropship\w*',
+        r'hot\s*new', r'new\s*arrival', r'wholesale', r'dropship\w*',
         r'cheap', r'lowest\s*price', r'factory\s*direct',
         r'top\s*selling', r'limited\s*time', r'special\s*offer',
         r'big\s*sale', r'clearance', r'on\s*sale', r'promotion',
         r'buy\s*\d+\s*get', r'aliexpress', r'ali\s*express',
         r'china\s*direct', r'from\s*china',
+        r'boy\s*gift', r'girl\s*gift', r'gift\s*for\s*\w+',
     ]
     for phrase in prohibited:
         title = re.sub(r'(?i)\b' + phrase + r'\b', '', title)
@@ -1136,6 +1137,47 @@ def _fill_toy_figure_fields(ws, row, col):
         c = col(field)
         if c:
             ws.cell(row=row, column=c, value=value)
+
+
+def _fill_offer_fields(ws, row, col, col_map, sell_price):
+    """Set ALL price, fulfillment, and offer fields needed for Buy Box / Featured Offer."""
+    # UK Price (the actual Buy Box price) — exact field name from template col 328
+    uk_price_field = "purchasable_offer[marketplace_id=a1f83g8c2aro7p]#1.our_price#1.schedule#1.value_with_tax"
+    c = col(uk_price_field)
+    if c:
+        ws.cell(row=row, column=c, value=sell_price)
+    else:
+        # Fallback: search for the UK price field
+        for field in col_map:
+            if "our_price" in field and "a1f83g8c2aro7p" in field:
+                ws.cell(row=row, column=col_map[field], value=sell_price)
+                break
+
+    # List price with tax (for display)
+    c = col("list_price_with_tax")
+    if c:
+        ws.cell(row=row, column=c, value=sell_price)
+
+    # Business price — enables B2B offers and helps Featured Offer eligibility
+    c = col("business_price")
+    if c:
+        ws.cell(row=row, column=c, value=sell_price)
+
+    # Condition
+    c = col("condition_type")
+    if c:
+        ws.cell(row=row, column=c, value="New")
+
+    # Fulfillment
+    c = col("fulfillment_availability#1.fulfillment_channel_code")
+    if c:
+        ws.cell(row=row, column=c, value="DEFAULT")
+    c = col("fulfillment_availability#1.quantity")
+    if c:
+        ws.cell(row=row, column=c, value=QUANTITY)
+    c = col("fulfillment_availability#1.lead_time_to_ship_max_days")
+    if c:
+        ws.cell(row=row, column=c, value=HANDLING_DAYS)
 
 
 def fill_amazon_template(template_path, products):
@@ -1248,9 +1290,6 @@ def fill_amazon_template(template_path, products):
             c = col("country_of_origin")
             if c:
                 ws.cell(row=row, column=c, value="China")
-            c = col("condition_type")
-            if c:
-                ws.cell(row=row, column=c, value="New")
             c = col("item_weight")
             if c:
                 ws.cell(row=row, column=c, value=0.5)
@@ -1273,26 +1312,7 @@ def fill_amazon_template(template_path, products):
             if c:
                 ws.cell(row=row, column=c, value="No")
             _fill_toy_figure_fields(ws, row, col)
-            c = col("list_price_with_tax")
-            if c:
-                ws.cell(row=row, column=c, value=sell_price)
-
-            # Price GBP (UK) — set on parent to avoid "Missing Offer"
-            for field in col_map:
-                if "our_price" in field and "a1f83g8c2aro7p" in field:
-                    ws.cell(row=row, column=col_map[field], value=sell_price)
-                    break
-
-            # Fulfillment on parent too
-            c = col("fulfillment_availability#1.fulfillment_channel_code")
-            if c:
-                ws.cell(row=row, column=c, value="DEFAULT")
-            c = col("fulfillment_availability#1.quantity")
-            if c:
-                ws.cell(row=row, column=c, value=QUANTITY)
-            c = col("fulfillment_availability#1.lead_time_to_ship_max_days")
-            if c:
-                ws.cell(row=row, column=c, value=HANDLING_DAYS)
+            _fill_offer_fields(ws, row, col, col_map, sell_price)
 
             # Main image on parent row
             main_img = images[0] if images else ""
@@ -1378,9 +1398,6 @@ def fill_amazon_template(template_path, products):
                 c = col("country_of_origin")
                 if c:
                     ws.cell(row=row, column=c, value="China")
-                c = col("condition_type")
-                if c:
-                    ws.cell(row=row, column=c, value="New")
                 c = col("item_weight")
                 if c:
                     ws.cell(row=row, column=c, value=0.5)
@@ -1403,26 +1420,7 @@ def fill_amazon_template(template_path, products):
                 if c:
                     ws.cell(row=row, column=c, value="No")
                 _fill_toy_figure_fields(ws, row, col)
-
-                # Fulfillment
-                c = col("fulfillment_availability#1.fulfillment_channel_code")
-                if c:
-                    ws.cell(row=row, column=c, value="DEFAULT")
-                c = col("fulfillment_availability#1.quantity")
-                if c:
-                    ws.cell(row=row, column=c, value=QUANTITY)
-                c = col("fulfillment_availability#1.lead_time_to_ship_max_days")
-                if c:
-                    ws.cell(row=row, column=c, value=HANDLING_DAYS)
-
-                # Price GBP (UK)
-                for field in col_map:
-                    if "our_price" in field and "a1f83g8c2aro7p" in field:
-                        ws.cell(row=row, column=col_map[field], value=sell_price)
-                        break
-                c = col("list_price_with_tax")
-                if c:
-                    ws.cell(row=row, column=c, value=sell_price)
+                _fill_offer_fields(ws, row, col, col_map, sell_price)
 
                 filled += 1
 
@@ -1487,9 +1485,6 @@ def fill_amazon_template(template_path, products):
             c = col("country_of_origin")
             if c:
                 ws.cell(row=row, column=c, value="China")
-            c = col("condition_type")
-            if c:
-                ws.cell(row=row, column=c, value="New")
             c = col("item_weight")
             if c:
                 ws.cell(row=row, column=c, value=0.5)
@@ -1512,26 +1507,7 @@ def fill_amazon_template(template_path, products):
             if c:
                 ws.cell(row=row, column=c, value="No")
             _fill_toy_figure_fields(ws, row, col)
-
-            # Fulfillment
-            c = col("fulfillment_availability#1.fulfillment_channel_code")
-            if c:
-                ws.cell(row=row, column=c, value="DEFAULT")
-            c = col("fulfillment_availability#1.quantity")
-            if c:
-                ws.cell(row=row, column=c, value=QUANTITY)
-            c = col("fulfillment_availability#1.lead_time_to_ship_max_days")
-            if c:
-                ws.cell(row=row, column=c, value=HANDLING_DAYS)
-
-            # Price GBP (UK)
-            for field in col_map:
-                if "our_price" in field and "a1f83g8c2aro7p" in field:
-                    ws.cell(row=row, column=col_map[field], value=sell_price)
-                    break
-            c = col("list_price_with_tax")
-            if c:
-                ws.cell(row=row, column=c, value=sell_price)
+            _fill_offer_fields(ws, row, col, col_map, sell_price)
 
             filled += 1
 
@@ -1541,11 +1517,15 @@ def fill_amazon_template(template_path, products):
     # --- Output as tab-delimited text ---
     # Only include columns that have a valid row3 header (field name).
     # Empty headers cause Amazon error 90061 "field heading is invalid".
-    max_col = ws.max_column or 308
+    max_col = max(ws.max_column or 308, 460)
     valid_cols = []
     for c in range(1, max_col + 1):
         r3 = ws.cell(row=3, column=c).value
         if r3 and str(r3).strip():
+            # Skip the processing report error columns that Amazon adds back
+            r3s = str(r3).strip()
+            if r3s.startswith("::"):
+                continue
             valid_cols.append(c)
 
     row1_vals = []
