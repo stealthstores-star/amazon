@@ -513,9 +513,11 @@ def scrape_details_parallel(context, products, main_tab):
     for batch_start in range(0, len(products), len(tabs)):
         batch = products[batch_start:batch_start + len(tabs)]
 
-        # Check for CAPTCHA on main tab before each batch
+        # Check for CAPTCHA on main tab AND all parallel tabs before each batch
         try:
             handle_captcha(main_tab)
+            for t in tabs:
+                handle_captcha(t)
         except Exception:
             pass
 
@@ -526,12 +528,36 @@ def scrape_details_parallel(context, products, main_tab):
             idx = batch_start + i
             log.info("    [%d/%d] Fetching details for %s...", idx + 1, len(products), pid)
             try:
-                tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=20000)
+                tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=15000)
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
 
         # Wait briefly for images to load on all tabs
         time.sleep(0.8)
+
+        # Check if any tab landed on CAPTCHA — if so, handle it and retry
+        captcha_tabs = []
+        for i, product in enumerate(batch):
+            try:
+                if is_captcha(tabs[i]):
+                    captcha_tabs.append(i)
+            except Exception:
+                pass
+
+        if captcha_tabs:
+            log.info("  CAPTCHA detected on %d tab(s), handling...", len(captcha_tabs))
+            # Handle CAPTCHA on the first tab that has it (solving one usually clears all)
+            handle_captcha(tabs[captcha_tabs[0]])
+            # Also check/handle main tab
+            handle_captcha(main_tab)
+            # Retry the CAPTCHA'd tabs
+            for i in captcha_tabs:
+                product = batch[i]
+                try:
+                    tabs[i].goto(product["product_url"], wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+            time.sleep(0.8)
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -544,6 +570,11 @@ def scrape_details_parallel(context, products, main_tab):
                 "detail_price": "",
             }
             try:
+                # Skip if still on CAPTCHA
+                if is_captcha(tabs[i]):
+                    log.debug("  Tab %d still on CAPTCHA, skipping %s", i, pid)
+                    results[idx] = result
+                    continue
                 dismiss_popups(tabs[i])
                 data = tabs[i].evaluate(DETAIL_EXTRACT_JS)
                 if data.get("images"):
@@ -557,6 +588,12 @@ def scrape_details_parallel(context, products, main_tab):
             except Exception as e:
                 log.debug("  Detail scrape failed for %s: %s", pid, str(e)[:80])
             results[idx] = result
+
+        # Check main tab after each batch — CAPTCHA may have appeared there too
+        try:
+            handle_captcha(main_tab)
+        except Exception:
+            pass
 
     # Close the extra tabs
     for t in tabs:
@@ -2560,21 +2597,34 @@ def main():
                     break
 
                 # --- Navigate to next page ---
-                # If sequential detail fetching was used, the main tab left
-                # the results page — need to go back via browser history.
-                if used_sequential:
-                    log.info("    Returning to search results...")
+                # Check if the main tab is still on the results page.
+                # CAPTCHA or redirects during parallel scraping can move it.
+                on_results = False
+                try:
+                    has_items = tab.query_selector("a[href*='/item/']")
+                    on_results = has_items is not None and not is_captcha(tab)
+                except Exception:
+                    pass
+
+                if not on_results:
+                    # Main tab lost its position — handle CAPTCHA if needed
+                    handle_captcha(tab)
+                    # Navigate back to the results page we were on
+                    log.info("    Returning to search results (page %d)...", pg)
+                    # Try browser back first (preserves store page state)
+                    recovered = False
                     try:
-                        tab.go_back(wait_until="domcontentloaded", timeout=15000)
-                        # May need multiple go_back calls to get past product pages
-                        for _ in range(5):
-                            try:
-                                tab.wait_for_selector("a[href*='/item/']", timeout=3000)
+                        for _ in range(10):
+                            tab.go_back(wait_until="domcontentloaded", timeout=10000)
+                            handle_captcha(tab)
+                            has_items = tab.query_selector("a[href*='/item/']")
+                            if has_items and not is_captcha(tab):
+                                recovered = True
                                 break
-                            except Exception:
-                                tab.go_back(wait_until="domcontentloaded", timeout=15000)
                     except Exception:
-                        # Fallback: navigate to current page URL
+                        pass
+                    if not recovered:
+                        # Fallback: navigate to URL directly
                         current_page_url = sort_by_orders(url)
                         if pg > 1:
                             parsed = urlparse(current_page_url)
