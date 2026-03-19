@@ -55,7 +55,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
-PARALLEL_TABS = 2               # 2 tabs — overlaps page loads to save time
+PARALLEL_TABS = 1               # Single tab — 2 tabs triggers CAPTCHAs
 
 # Proxy pool disabled — cheap datacenter proxies trigger more CAPTCHAs than
 # browsing direct from a residential IP.  Keep the list empty so proxy code
@@ -578,7 +578,7 @@ def scrape_details_parallel(context, products, main_tab):
         except Exception:
             pass
 
-        # Fire navigations on all tabs quickly, then wait once
+        # Navigate each tab and wait for content
         for i, product in enumerate(batch):
             pid = product["id"]
             product_url = product["product_url"]
@@ -589,8 +589,11 @@ def scrape_details_parallel(context, products, main_tab):
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
 
-        # Single wait for all tabs to render content
-        time.sleep(random.uniform(1.2, 1.8))
+        # Wait for content to render
+        try:
+            tabs[0].wait_for_selector('img[src*="alicdn"], [class*="gallery"], [class*="image"]', timeout=3000)
+        except Exception:
+            time.sleep(0.5)
 
         # Check if any tab landed on CAPTCHA — if so, handle it and retry
         captcha_tabs = []
