@@ -55,7 +55,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
-PARALLEL_TABS = 1               # Sequential — multiple tabs triggers CAPTCHA storms
+PARALLEL_TABS = 2               # 2 tabs — overlaps page loads to save time
 
 # Proxy pool disabled — cheap datacenter proxies trigger more CAPTCHAs than
 # browsing direct from a residential IP.  Keep the list empty so proxy code
@@ -578,7 +578,7 @@ def scrape_details_parallel(context, products, main_tab):
         except Exception:
             pass
 
-        # Start navigation on all tabs simultaneously
+        # Fire navigations on all tabs quickly, then wait once
         for i, product in enumerate(batch):
             pid = product["id"]
             product_url = product["product_url"]
@@ -588,10 +588,9 @@ def scrape_details_parallel(context, products, main_tab):
                 tabs[i].goto(product_url, wait_until="commit", timeout=10000)
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
-            time.sleep(random.uniform(0.2, 0.4))
 
-        # Wait for page content to render
-        time.sleep(random.uniform(0.8, 1.2))
+        # Single wait for all tabs to render content
+        time.sleep(random.uniform(1.2, 1.8))
 
         # Check if any tab landed on CAPTCHA — if so, handle it and retry
         captcha_tabs = []
