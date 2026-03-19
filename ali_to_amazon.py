@@ -1141,7 +1141,7 @@ def _fill_toy_figure_fields(ws, row, col):
 
 def _fill_offer_fields(ws, row, col, col_map, sell_price):
     """Set ALL price, fulfillment, and offer fields needed for Buy Box / Featured Offer."""
-    # UK Price (the actual Buy Box price) — exact field name from template col 328
+    # UK Price (the actual Buy Box price) — Amazon UK marketplace ID
     uk_price_field = "purchasable_offer[marketplace_id=a1f83g8c2aro7p]#1.our_price#1.schedule#1.value_with_tax"
     c = col(uk_price_field)
     if c:
@@ -1153,15 +1153,13 @@ def _fill_offer_fields(ws, row, col, col_map, sell_price):
                 ws.cell(row=row, column=col_map[field], value=sell_price)
                 break
 
-    # List price with tax (for display)
+    # List price with tax (for strikethrough display)
     c = col("list_price_with_tax")
     if c:
         ws.cell(row=row, column=c, value=sell_price)
 
-    # Business price — enables B2B offers and helps Featured Offer eligibility
-    c = col("business_price")
-    if c:
-        ws.cell(row=row, column=c, value=sell_price)
+    # NOTE: Do NOT set business_price — Amazon rejects this field heading
+    # with error 90061 "field heading is invalid" for this product type.
 
     # Condition
     c = col("condition_type")
@@ -1244,6 +1242,9 @@ def fill_amazon_template(template_path, products):
             c = col("feed_product_type")
             if c:
                 ws.cell(row=row, column=c, value=PRODUCT_TYPE)
+            c = col("update_delete")
+            if c:
+                ws.cell(row=row, column=c, value="Update")
             c = col("item_sku")
             if c:
                 ws.cell(row=row, column=c, value=parent_sku)
@@ -1331,6 +1332,9 @@ def fill_amazon_template(template_path, products):
                 c = col("feed_product_type")
                 if c:
                     ws.cell(row=row, column=c, value=PRODUCT_TYPE)
+                c = col("update_delete")
+                if c:
+                    ws.cell(row=row, column=c, value="Update")
                 c = col("item_sku")
                 if c:
                     ws.cell(row=row, column=c, value=child_sku)
@@ -1431,6 +1435,9 @@ def fill_amazon_template(template_path, products):
             c = col("feed_product_type")
             if c:
                 ws.cell(row=row, column=c, value=PRODUCT_TYPE)
+            c = col("update_delete")
+            if c:
+                ws.cell(row=row, column=c, value="Update")
             c = col("item_sku")
             if c:
                 ws.cell(row=row, column=c, value="ALI-" + str(pid))
@@ -1518,13 +1525,24 @@ def fill_amazon_template(template_path, products):
     # Only include columns that have a valid row3 header (field name).
     # Empty headers cause Amazon error 90061 "field heading is invalid".
     max_col = max(ws.max_column or 308, 460)
+    # Columns Amazon rejects with error 90061 "field heading is invalid"
+    INVALID_FIELD_HEADINGS = {"business_price", "quantity_price_type",
+                               "quantity_lower_bound1", "quantity_price1",
+                               "quantity_lower_bound2", "quantity_price2",
+                               "quantity_lower_bound3", "quantity_price3",
+                               "quantity_lower_bound4", "quantity_price4",
+                               "quantity_lower_bound5", "quantity_price5"}
+
     valid_cols = []
     for c in range(1, max_col + 1):
         r3 = ws.cell(row=3, column=c).value
         if r3 and str(r3).strip():
-            # Skip the processing report error columns that Amazon adds back
             r3s = str(r3).strip()
+            # Skip the processing report error columns that Amazon adds back
             if r3s.startswith("::"):
+                continue
+            # Skip columns Amazon rejects as invalid headings
+            if r3s.lower() in INVALID_FIELD_HEADINGS:
                 continue
             valid_cols.append(c)
 
