@@ -2529,21 +2529,9 @@ def main():
             context = browser.new_context(**ctx_kwargs)
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                // Block popups from opening new tabs
                 window.open = function() { return null; };
             """)
-            # Track tabs we intentionally open; auto-close any others (popups)
-            _our_tabs = set()
-            def _close_popup(p):
-                if p not in _our_tabs:
-                    try:
-                        p.close()
-                    except Exception:
-                        pass
-            context.on("page", _close_popup)
             tab = context.new_page()
-            _our_tabs.add(tab)
-            time.sleep(2)  # let Chrome settle before navigating
 
         # --- Login to AliExpress before scraping ---
         ensure_browser()
@@ -2707,7 +2695,6 @@ def main():
                     detail_results = []
                     # Use a single dedicated detail tab — keeps search tab intact
                     detail_tab = context.new_page()
-                    _our_tabs.add(detail_tab)
                     for p_idx, product in enumerate(products):
                         pid = product["id"]
                         product_url = product["product_url"]
