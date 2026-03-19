@@ -2692,16 +2692,15 @@ def main():
                 used_sequential = True
                 if not args.skip_details:
                     detail_results = []
-                    # Use a single dedicated detail tab — keeps search tab intact
-                    detail_tab = context.new_page()
                     for p_idx, product in enumerate(products):
                         pid = product["id"]
                         product_url = product["product_url"]
+                        # Wait BEFORE each fetch — human browsing pace
+                        if p_idx > 0:
+                            time.sleep(random.uniform(3.0, 5.0))
                         log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
-                        handle_captcha(detail_tab)
-                        detail_results.append(scrape_product_detail(detail_tab, product_url, pid))
-                        time.sleep(random.uniform(3.0, 5.0))
-                    detail_tab.close()
+                        handle_captcha(tab)
+                        detail_results.append(scrape_product_detail(tab, product_url, pid))
 
                     # Apply detail results to products
                     for p_idx, product in enumerate(products):
