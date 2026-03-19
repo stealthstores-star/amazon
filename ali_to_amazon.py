@@ -663,6 +663,9 @@ def is_captcha(tab):
             "iframe[src*='nocaptcha']", "iframe[src*='sec.aliexpress']",
             "[class*='slider-verify']", "[class*='SliderCaptcha']",
             "[class*='slide-verify']", "[class*='smartCaptcha']",
+            # Google reCAPTCHA
+            "iframe[src*='recaptcha']", "iframe[src*='google.com/recaptcha']",
+            ".g-recaptcha", "#recaptcha", "[class*='recaptcha']",
         ]:
             try:
                 el = tab.query_selector(sel)
@@ -683,7 +686,8 @@ def is_captcha(tab):
             if len(text) < 500:
                 low = text.lower()
                 if any(w in low for w in ["captcha", "verify you are human", "robot",
-                                          "slide to verify", "puzzle", "drag the slider"]):
+                                          "slide to verify", "puzzle", "drag the slider",
+                                          "not a robot", "check if you are"]):
                     return True
     except Exception:
         pass
@@ -2434,11 +2438,18 @@ def main():
                 qs["page"] = [str(pg)]
                 next_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
                 log.info("  Navigating to page %d...", pg)
+
+                nav_ok = False
                 try:
                     tab.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
-                    tab.wait_for_selector("a[href*='/item/']", timeout=8000)
+                    # Check for CAPTCHA/login after landing and handle it
+                    wait_ready(tab, next_page_url)
+                    nav_ok = True
                 except Exception:
-                    # If direct navigation fails, try click_next as fallback
+                    pass
+
+                if not nav_ok:
+                    # Fallback: go back and try click_next
                     log.info("  Direct nav failed, trying click_next...")
                     try:
                         tab.go_back(wait_until="domcontentloaded", timeout=15000)
