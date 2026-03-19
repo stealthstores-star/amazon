@@ -2511,41 +2511,21 @@ def main():
                     browser.close()
             except Exception:
                 pass
-            # Use persistent context with real Chrome user-data so passkeys,
-            # cookies, and extensions are available.
-            import platform
-            if platform.system() == "Darwin":
-                chrome_user_data = str(
-                    Path.home() / "Library/Application Support/Google/Chrome"
-                )
-            elif platform.system() == "Windows":
-                chrome_user_data = str(
-                    Path(os.environ["LOCALAPPDATA"]) / "Google/Chrome/User Data"
-                )
-            else:
-                chrome_user_data = str(
-                    Path.home() / ".config/google-chrome"
-                )
-
             launch_kwargs = dict(
                 headless=False,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                ],
-                channel="chrome",  # use installed Google Chrome (not Chromium)
+                args=["--disable-blink-features=AutomationControlled"],
+                channel="chrome",  # use installed Chrome — better fingerprint
             )
             proxy_server = get_proxy_server()
             if proxy_server:
                 launch_kwargs["proxy"] = {"server": proxy_server}
                 log.info("  Using proxy: %s", proxy_server)
-
-            context = pw.chromium.launch_persistent_context(
-                chrome_user_data,
-                **launch_kwargs,
+            browser = pw.chromium.launch(**launch_kwargs)
+            ctx_kwargs = dict(
                 viewport={"width": 1280, "height": 800},
                 locale="en-US",
             )
-            browser = None  # persistent context manages its own browser
+            context = browser.new_context(**ctx_kwargs)
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             """)
