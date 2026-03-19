@@ -2514,7 +2514,6 @@ def main():
                 pass
             launch_kwargs = dict(
                 headless=False,
-                channel="msedge",
                 args=["--disable-blink-features=AutomationControlled"],
             )
             proxy_server = get_proxy_server()
