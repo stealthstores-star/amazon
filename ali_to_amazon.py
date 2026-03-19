@@ -2557,34 +2557,40 @@ def main():
                     log.info("  No new products — done with this URL.")
                     break
 
-                # Navigate to next page via direct URL (most reliable)
-                pg += 1
-                next_page_url = sort_by_orders(url)
-                parsed = urlparse(next_page_url)
-                qs = parse_qs(parsed.query, keep_blank_values=True)
-                qs["page"] = [str(pg)]
-                next_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
-                log.info("  Navigating to page %d...", pg)
-
-                nav_ok = False
+                # --- Navigate to next page ---
+                # First, return to the current search/store results page
+                log.info("    Returning to search results...")
+                current_page_url = sort_by_orders(url)
+                if pg > 1:
+                    parsed = urlparse(current_page_url)
+                    qs = parse_qs(parsed.query, keep_blank_values=True)
+                    qs["page"] = [str(pg)]
+                    current_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
                 try:
-                    tab.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
-                    # Check for CAPTCHA/login after landing and handle it
-                    wait_ready(tab, next_page_url)
-                    nav_ok = True
+                    tab.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
+                    wait_ready(tab, current_page_url)
                 except Exception:
                     pass
 
-                if not nav_ok:
-                    # Fallback: go back and try click_next
-                    log.info("  Direct nav failed, trying click_next...")
+                # Now click the Next button on the actual page
+                pg += 1
+                log.info("  Navigating to page %d...", pg)
+                if click_next(tab, pg):
                     try:
-                        tab.go_back(wait_until="domcontentloaded", timeout=15000)
-                        tab.wait_for_timeout(1000)
-                        if not click_next(tab, pg - 1):
-                            log.info("  No next page — done.")
-                            break
-                        tab.wait_for_selector("a[href*='/item/']", timeout=5000)
+                        tab.wait_for_selector("a[href*='/item/']", timeout=8000)
+                    except Exception:
+                        pass
+                else:
+                    # Fallback: try direct URL navigation (works for search pages)
+                    log.info("  click_next failed, trying direct URL...")
+                    next_page_url = sort_by_orders(url)
+                    parsed = urlparse(next_page_url)
+                    qs = parse_qs(parsed.query, keep_blank_values=True)
+                    qs["page"] = [str(pg)]
+                    next_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+                    try:
+                        tab.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
+                        wait_ready(tab, next_page_url)
                     except Exception:
                         log.info("  Could not reach page %d — done.", pg)
                         break
