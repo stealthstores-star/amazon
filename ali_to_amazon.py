@@ -617,7 +617,7 @@ def scrape_details_parallel(context, products, main_tab):
                     tabs[i].goto(product["product_url"], wait_until="commit", timeout=10000)
                 except Exception:
                     pass
-            time.sleep(random.uniform(0.5, 0.8))
+            time.sleep(random.uniform(3.0, 5.0))
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -2700,7 +2700,7 @@ def main():
                         log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
                         handle_captcha(detail_tab)
                         detail_results.append(scrape_product_detail(detail_tab, product_url, pid))
-                        time.sleep(random.uniform(0.2, 0.4))
+                        time.sleep(random.uniform(3.0, 5.0))
                     detail_tab.close()
 
                     # Apply detail results to products
@@ -2800,7 +2800,7 @@ def main():
                         log.info("  Could not reach page %d — done.", pg)
                         break
 
-                time.sleep(random.uniform(0.5, 1.0))
+                time.sleep(random.uniform(3.0, 5.0))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
