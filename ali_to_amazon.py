@@ -2529,7 +2529,6 @@ def main():
             context = browser.new_context(**ctx_kwargs)
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.open = function() { return null; };
             """)
             tab = context.new_page()
 
