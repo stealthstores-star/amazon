@@ -57,13 +57,10 @@ MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
 PARALLEL_TABS = 1               # Sequential — multiple tabs triggers CAPTCHA storms
 
-# SOCKS5 proxy pool — rotated per URL to spread traffic
-# Playwright can't do SOCKS5 auth natively, so we run a local pproxy forwarder.
-# Format: (host, port, username, password)
-PROXY_POOL = [
-    ("165.49.88.29", 11000, "nodemavenJstTb", "ROr1Sg4IVXzs"),
-    ("78.24.126.8", 12324, "14ae8bf2e23dd", "77c507a188"),
-]
+# Proxy pool disabled — cheap datacenter proxies trigger more CAPTCHAs than
+# browsing direct from a residential IP.  Keep the list empty so proxy code
+# is safely skipped everywhere.
+PROXY_POOL = []
 PROXY_LOCAL_BASE_PORT = 19800  # local forwarder listens on 19800, 19801, etc.
 _proxy_procs = []  # track pproxy subprocesses for cleanup
 
@@ -591,11 +588,11 @@ def scrape_details_parallel(context, products, main_tab):
                 tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=15000)
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
-            # Human-realistic delay between navigations
-            time.sleep(random.uniform(2.0, 4.0))
+            # Brief pause between navigations (single tab, no proxy)
+            time.sleep(random.uniform(0.8, 1.5))
 
         # Wait for images to load
-        time.sleep(random.uniform(1.5, 2.5))
+        time.sleep(random.uniform(0.8, 1.2))
 
         # Check if any tab landed on CAPTCHA — if so, handle it and retry
         captcha_tabs = []
@@ -619,7 +616,7 @@ def scrape_details_parallel(context, products, main_tab):
                     tabs[i].goto(product["product_url"], wait_until="domcontentloaded", timeout=15000)
                 except Exception:
                     pass
-            time.sleep(random.uniform(2.0, 3.5))
+            time.sleep(random.uniform(1.0, 1.5))
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -2703,7 +2700,7 @@ def main():
                             log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
                             handle_captcha(tab)
                             detail_results.append(scrape_product_detail(tab, product_url, pid))
-                            time.sleep(random.uniform(2.0, 4.0))
+                            time.sleep(random.uniform(0.8, 1.5))
 
                     # Apply detail results to products
                     for p_idx, product in enumerate(products):
@@ -2802,7 +2799,7 @@ def main():
                         log.info("  Could not reach page %d — done.", pg)
                         break
 
-                time.sleep(random.uniform(2.0, 4.0))
+                time.sleep(random.uniform(1.0, 2.0))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
