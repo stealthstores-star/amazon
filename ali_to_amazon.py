@@ -1004,8 +1004,12 @@ def rehost_image(img_url):
                    or img_data.get("display_url", "")
                    or img_data.get("url", ""))
             if url:
-                log.info(f"          [IMG] imgbb: {url}")
-                return url
+                # Verify the uploaded image is accessible before returning
+                if _verify_hosted_image(url):
+                    log.info(f"          [IMG] imgbb: {url}")
+                    return url
+                else:
+                    log.warning(f"          [IMG] imgbb uploaded but not accessible: {url}")
         log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         log.info(f"          [IMG] imgbb error: {e}")
@@ -1244,11 +1248,6 @@ def _fill_offer_fields(ws, row, col, col_map, sell_price):
 
     # List price with tax (for strikethrough display)
     c = col("list_price_with_tax")
-    if c:
-        ws.cell(row=row, column=c, value=sell_price)
-
-    # Business price — enables B2B offers and helps Featured Offer eligibility
-    c = col("business_price")
     if c:
         ws.cell(row=row, column=c, value=sell_price)
 
@@ -1613,7 +1612,8 @@ def fill_amazon_template(template_path, products):
                                "quantity_lower_bound2", "quantity_price2",
                                "quantity_lower_bound3", "quantity_price3",
                                "quantity_lower_bound4", "quantity_price4",
-                               "quantity_lower_bound5", "quantity_price5"}
+                               "quantity_lower_bound5", "quantity_price5",
+                               "business_price"}
 
     valid_cols = []
     for c in range(1, max_col + 1):
