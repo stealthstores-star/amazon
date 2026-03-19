@@ -2513,7 +2513,7 @@ def main():
                 pass
             launch_kwargs = dict(
                 headless=False,
-                channel="chrome",
+                channel="msedge",
                 args=["--disable-blink-features=AutomationControlled"],
             )
             proxy_server = get_proxy_server()
