@@ -1158,8 +1158,10 @@ def _fill_offer_fields(ws, row, col, col_map, sell_price):
     if c:
         ws.cell(row=row, column=c, value=sell_price)
 
-    # NOTE: Do NOT set business_price — Amazon rejects this field heading
-    # with error 90061 "field heading is invalid" for this product type.
+    # Business price — enables B2B offers and helps Featured Offer eligibility
+    c = col("business_price")
+    if c:
+        ws.cell(row=row, column=c, value=sell_price)
 
     # Condition
     c = col("condition_type")
@@ -1242,9 +1244,6 @@ def fill_amazon_template(template_path, products):
             c = col("feed_product_type")
             if c:
                 ws.cell(row=row, column=c, value=PRODUCT_TYPE)
-            c = col("update_delete")
-            if c:
-                ws.cell(row=row, column=c, value="Update")
             c = col("item_sku")
             if c:
                 ws.cell(row=row, column=c, value=parent_sku)
@@ -1332,9 +1331,6 @@ def fill_amazon_template(template_path, products):
                 c = col("feed_product_type")
                 if c:
                     ws.cell(row=row, column=c, value=PRODUCT_TYPE)
-                c = col("update_delete")
-                if c:
-                    ws.cell(row=row, column=c, value="Update")
                 c = col("item_sku")
                 if c:
                     ws.cell(row=row, column=c, value=child_sku)
@@ -1435,9 +1431,6 @@ def fill_amazon_template(template_path, products):
             c = col("feed_product_type")
             if c:
                 ws.cell(row=row, column=c, value=PRODUCT_TYPE)
-            c = col("update_delete")
-            if c:
-                ws.cell(row=row, column=c, value="Update")
             c = col("item_sku")
             if c:
                 ws.cell(row=row, column=c, value="ALI-" + str(pid))
@@ -1526,7 +1519,7 @@ def fill_amazon_template(template_path, products):
     # Empty headers cause Amazon error 90061 "field heading is invalid".
     max_col = max(ws.max_column or 308, 460)
     # Columns Amazon rejects with error 90061 "field heading is invalid"
-    INVALID_FIELD_HEADINGS = {"business_price", "quantity_price_type",
+    INVALID_FIELD_HEADINGS = {"quantity_price_type",
                                "quantity_lower_bound1", "quantity_price1",
                                "quantity_lower_bound2", "quantity_price2",
                                "quantity_lower_bound3", "quantity_price3",
