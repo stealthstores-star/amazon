@@ -2513,6 +2513,7 @@ def main():
                 pass
             launch_kwargs = dict(
                 headless=False,
+                channel="chrome",
                 args=["--disable-blink-features=AutomationControlled"],
             )
             proxy_server = get_proxy_server()
@@ -2529,20 +2530,24 @@ def main():
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             """)
             tab = context.new_page()
+            time.sleep(2)  # let Chrome settle before navigating
 
         # --- Login to AliExpress before scraping ---
         ensure_browser()
         log.info("=" * 60)
         log.info(">>> Please log in to AliExpress in the browser window. <<<")
         log.info("=" * 60)
+        log.info("Navigating to AliExpress login...")
         try:
             tab.goto("https://login.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
-        except Exception:
-            # Fallback URL
+            log.info("  Login page loaded.")
+        except Exception as e:
+            log.warning("  Login page failed (%s), trying main page...", str(e)[:80])
             try:
                 tab.goto("https://www.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
-            except Exception:
-                pass
+                log.info("  Main page loaded.")
+            except Exception as e2:
+                log.warning("  Main page also failed: %s", str(e2)[:80])
 
         # Wait for user to complete login
         # Check if already logged in (has account icon/name) or on login page
