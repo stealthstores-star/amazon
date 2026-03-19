@@ -2471,19 +2471,17 @@ def main():
             )
             proxy = get_proxy_config()
             if proxy:
-                launch_kwargs["proxy"] = {"server": proxy["server"]}
+                proxy_cfg = {"server": proxy["server"]}
+                if proxy.get("username"):
+                    proxy_cfg["username"] = proxy["username"]
+                    proxy_cfg["password"] = proxy.get("password", "")
+                launch_kwargs["proxy"] = proxy_cfg
+                log.info("  Using proxy: %s", proxy["server"])
             browser = pw.chromium.launch(**launch_kwargs)
             ctx_kwargs = dict(
                 viewport={"width": 1280, "height": 800},
                 locale="en-US",
             )
-            if proxy and proxy.get("username"):
-                ctx_kwargs["http_credentials"] = {
-                    "username": proxy["username"],
-                    "password": proxy.get("password", ""),
-                }
-            if proxy:
-                log.info("  Using proxy: %s", proxy["server"])
             context = browser.new_context(**ctx_kwargs)
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
