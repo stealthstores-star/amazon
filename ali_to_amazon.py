@@ -1644,6 +1644,17 @@ def fill_amazon_template(template_path, products):
             row_data.append(str(val) if val is not None else "")
         data_rows.append(row_data)
 
+    # Cache worksheet data before closing (needed for offer update file)
+    ws_copy_r1 = {c: ws.cell(row=1, column=c).value for c in range(1, max_col + 1)}
+    ws_copy_r2 = {c: ws.cell(row=2, column=c).value for c in range(1, max_col + 1)}
+    ws_copy_r3 = {c: ws.cell(row=3, column=c).value for c in range(1, max_col + 1)}
+    ws_copy_data = {}
+    for r in range(start_row, start_row + filled):
+        for c in range(1, max_col + 1):
+            val = ws.cell(row=r, column=c).value
+            if val is not None:
+                ws_copy_data[(r, c)] = val
+
     wb.close()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1654,6 +1665,43 @@ def fill_amazon_template(template_path, products):
         f.write("\t".join(row3_vals) + "\n")
         for row_data in data_rows:
             f.write("\t".join(row_data) + "\n")
+
+    # --- Also generate offer-only PartialUpdate file ---
+    # Amazon often creates the product but doesn't attach the offer on first upload.
+    # This separate file forces offers onto existing listings.
+    offer_fields_needed = [
+        'feed_product_type', 'item_sku', 'update_delete', 'condition_type',
+        'fulfillment_availability#1.fulfillment_channel_code',
+        'fulfillment_availability#1.quantity',
+        'fulfillment_availability#1.lead_time_to_ship_max_days',
+        'purchasable_offer[marketplace_id=a1f83g8c2aro7p]#1.our_price#1.schedule#1.value_with_tax',
+    ]
+    offer_col_indices = []
+    for f in offer_fields_needed:
+        c = col_map.get(f.lower())
+        if c:
+            offer_col_indices.append(c)
+    if offer_col_indices:
+        offer_r1 = [str(ws_copy_r1.get(c, "")) for c in offer_col_indices]
+        offer_r2 = [str(ws_copy_r2.get(c, "")) for c in offer_col_indices]
+        offer_r3 = [str(ws_copy_r3.get(c, "")) for c in offer_col_indices]
+        offer_name = f"amazon_offer_update_{ts}.txt"
+        with open(offer_name, "w", encoding="utf-8") as f:
+            f.write("\t".join(offer_r1) + "\n")
+            f.write("\t".join(offer_r2) + "\n")
+            f.write("\t".join(offer_r3) + "\n")
+            for r in range(start_row, start_row + filled):
+                row_data = []
+                for ci, c in enumerate(offer_col_indices):
+                    field = offer_fields_needed[ci]
+                    if field == 'update_delete':
+                        row_data.append("PartialUpdate")
+                    else:
+                        val = ws_copy_data.get((r, c))
+                        row_data.append(str(val) if val is not None else "")
+                f.write("\t".join(row_data) + "\n")
+        log.info("  Also generated offer update file: %s", offer_name)
+        log.info("  Upload this AFTER the main file to fix any missing offers.")
 
     return output_name, filled
 
