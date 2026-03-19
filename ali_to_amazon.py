@@ -2514,7 +2514,6 @@ def main():
             launch_kwargs = dict(
                 headless=False,
                 args=["--disable-blink-features=AutomationControlled"],
-                channel="chrome",  # use installed Chrome — better fingerprint
             )
             proxy_server = get_proxy_server()
             if proxy_server:
