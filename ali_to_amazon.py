@@ -514,10 +514,10 @@ def scrape_product_detail(tab, product_url, product_id):
     }
 
     try:
-        tab.goto(product_url, wait_until="domcontentloaded", timeout=15000)
-        # Wait for images to load
+        tab.goto(product_url, wait_until="commit", timeout=10000)
+        # Wait for product content to render
         try:
-            tab.wait_for_selector('img[src*="alicdn"]', timeout=3000)
+            tab.wait_for_selector('img[src*="alicdn"]', timeout=2000)
         except Exception:
             pass
 
@@ -585,13 +585,13 @@ def scrape_details_parallel(context, products, main_tab):
             idx = batch_start + i
             log.info("    [%d/%d] Fetching details for %s...", idx + 1, len(products), pid)
             try:
-                tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=15000)
+                tabs[i].goto(product_url, wait_until="commit", timeout=10000)
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
-            time.sleep(random.uniform(0.3, 0.6))
+            time.sleep(random.uniform(0.2, 0.4))
 
-        # Wait for images to load
-        time.sleep(random.uniform(0.5, 0.8))
+        # Wait for page content to render
+        time.sleep(random.uniform(0.8, 1.2))
 
         # Check if any tab landed on CAPTCHA — if so, handle it and retry
         captcha_tabs = []
@@ -612,7 +612,7 @@ def scrape_details_parallel(context, products, main_tab):
             for i in captcha_tabs:
                 product = batch[i]
                 try:
-                    tabs[i].goto(product["product_url"], wait_until="domcontentloaded", timeout=15000)
+                    tabs[i].goto(product["product_url"], wait_until="commit", timeout=10000)
                 except Exception:
                     pass
             time.sleep(random.uniform(0.5, 0.8))
