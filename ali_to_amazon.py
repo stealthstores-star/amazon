@@ -2514,12 +2514,14 @@ def main():
                     products = products[:remaining]
 
                 # --- Visit each product detail page for ALL images + variations ---
+                used_sequential = False
                 if not args.skip_details:
                     # Try parallel fetching first (3x faster)
                     detail_results = scrape_details_parallel(context, products, tab)
 
                     if detail_results is None:
                         # Fallback to sequential if parallel tabs failed
+                        used_sequential = True
                         log.info("    Using sequential detail fetching...")
                         detail_results = []
                         for p_idx, product in enumerate(products):
@@ -2558,21 +2560,40 @@ def main():
                     break
 
                 # --- Navigate to next page ---
-                # First, return to the current search/store results page
-                log.info("    Returning to search results...")
-                current_page_url = sort_by_orders(url)
-                if pg > 1:
-                    parsed = urlparse(current_page_url)
-                    qs = parse_qs(parsed.query, keep_blank_values=True)
-                    qs["page"] = [str(pg)]
-                    current_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+                # If sequential detail fetching was used, the main tab left
+                # the results page — need to go back via browser history.
+                if used_sequential:
+                    log.info("    Returning to search results...")
+                    try:
+                        tab.go_back(wait_until="domcontentloaded", timeout=15000)
+                        # May need multiple go_back calls to get past product pages
+                        for _ in range(5):
+                            try:
+                                tab.wait_for_selector("a[href*='/item/']", timeout=3000)
+                                break
+                            except Exception:
+                                tab.go_back(wait_until="domcontentloaded", timeout=15000)
+                    except Exception:
+                        # Fallback: navigate to current page URL
+                        current_page_url = sort_by_orders(url)
+                        if pg > 1:
+                            parsed = urlparse(current_page_url)
+                            qs = parse_qs(parsed.query, keep_blank_values=True)
+                            qs["page"] = [str(pg)]
+                            current_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+                        try:
+                            tab.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
+                            wait_ready(tab, current_page_url)
+                        except Exception:
+                            pass
+
+                # Scroll to bottom so pagination buttons are visible
                 try:
-                    tab.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
-                    wait_ready(tab, current_page_url)
+                    tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    tab.wait_for_timeout(300)
                 except Exception:
                     pass
 
-                # Now click the Next button on the actual page
                 pg += 1
                 log.info("  Navigating to page %d...", pg)
                 if click_next(tab, pg):
