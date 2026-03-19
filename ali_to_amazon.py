@@ -19,9 +19,12 @@ import csv
 import json
 import logging
 import math
+import atexit
 import os
 import random
 import re
+import signal
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -55,18 +58,61 @@ MAX_IMAGES = 9                  # Amazon allows main + 8 other images
 PARALLEL_TABS = 3               # Number of tabs for parallel detail fetching
 
 # SOCKS5 proxy pool — rotated per URL to spread traffic
+# Playwright can't do SOCKS5 auth natively, so we run a local pproxy forwarder.
+# Format: (host, port, username, password)
 PROXY_POOL = [
-    {
-        "server": "socks5://165.49.88.29:11000",
-        "username": "nodemavenJstTb",
-        "password": "ROr1Sg4IVXzs",
-    },
-    {
-        "server": "socks5://78.24.126.8:12324",
-        "username": "14ae8bf2e23dd",
-        "password": "77c507a188",
-    },
+    ("165.49.88.29", 11000, "nodemavenJstTb", "ROr1Sg4IVXzs"),
+    ("78.24.126.8", 12324, "14ae8bf2e23dd", "77c507a188"),
 ]
+PROXY_LOCAL_BASE_PORT = 19800  # local forwarder listens on 19800, 19801, etc.
+_proxy_procs = []  # track pproxy subprocesses for cleanup
+
+
+def start_proxy_forwarders():
+    """Launch local pproxy forwarders for each SOCKS5 proxy in the pool.
+
+    Playwright can't do SOCKS5 auth, so we run local HTTP proxies that
+    forward to the authenticated SOCKS5 proxies. Returns list of
+    local proxy URLs like http://127.0.0.1:19800.
+    """
+    local_urls = []
+    for idx, (host, port, user, pwd) in enumerate(PROXY_POOL):
+        local_port = PROXY_LOCAL_BASE_PORT + idx
+        # pproxy: listen as HTTP on local port, forward to SOCKS5 with auth
+        remote = f"socks5://{host}:{port}#{user}:{pwd}"
+        local = f"http://127.0.0.1:{local_port}"
+        cmd = [sys.executable, "-m", "pproxy", "-l", local, "-r", remote]
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            _proxy_procs.append(proc)
+            local_urls.append(f"http://127.0.0.1:{local_port}")
+            log.info("  Proxy forwarder: %s → socks5://%s:%s", local, host, port)
+        except Exception as e:
+            log.warning("  Failed to start proxy forwarder for %s:%s: %s", host, port, e)
+    # Give forwarders a moment to start
+    if local_urls:
+        time.sleep(1)
+    return local_urls
+
+
+def stop_proxy_forwarders():
+    """Kill all pproxy forwarder subprocesses."""
+    for proc in _proxy_procs:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    _proxy_procs.clear()
+
+
+atexit.register(stop_proxy_forwarders)
+
 
 # ---- SMART PRICING CONFIG ----
 TARGET_PROFIT_MARGIN = 0.30
@@ -2423,22 +2469,25 @@ def main():
     csv_out = LiveCSV(out)
     log.info("Output: %s", out)
 
+    # Start local proxy forwarders for SOCKS5 proxies
+    proxy_local_urls = []
+    if not args.proxy and PROXY_POOL:
+        proxy_local_urls = start_proxy_forwarders()
     proxy_index = [0]  # mutable so nested functions can update it
 
-    def get_proxy_config():
-        """Get the current proxy config from pool, --proxy flag, or None."""
+    def get_proxy_server():
+        """Get the current proxy server URL."""
         if args.proxy:
-            return {"server": args.proxy}
-        if PROXY_POOL:
-            return PROXY_POOL[proxy_index[0] % len(PROXY_POOL)]
+            return args.proxy
+        if proxy_local_urls:
+            return proxy_local_urls[proxy_index[0] % len(proxy_local_urls)]
         return None
 
     def rotate_proxy():
         """Switch to the next proxy in the pool."""
-        if PROXY_POOL and not args.proxy:
+        if proxy_local_urls and not args.proxy:
             proxy_index[0] += 1
-            p = get_proxy_config()
-            log.info("  Rotated to proxy: %s", p["server"])
+            log.info("  Rotated to proxy: %s", get_proxy_server())
 
     with sync_playwright() as pw:
         browser = None
@@ -2469,14 +2518,10 @@ def main():
                 headless=False,
                 args=["--disable-blink-features=AutomationControlled"],
             )
-            proxy = get_proxy_config()
-            if proxy:
-                proxy_cfg = {"server": proxy["server"]}
-                if proxy.get("username"):
-                    proxy_cfg["username"] = proxy["username"]
-                    proxy_cfg["password"] = proxy.get("password", "")
-                launch_kwargs["proxy"] = proxy_cfg
-                log.info("  Using proxy: %s", proxy["server"])
+            proxy_server = get_proxy_server()
+            if proxy_server:
+                launch_kwargs["proxy"] = {"server": proxy_server}
+                log.info("  Using proxy: %s", proxy_server)
             browser = pw.chromium.launch(**launch_kwargs)
             ctx_kwargs = dict(
                 viewport={"width": 1280, "height": 800},
