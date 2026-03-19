@@ -704,10 +704,8 @@ def _download_and_convert(img_url):
         try:
             img = Image.open(BytesIO(resp.content))
             w, h = img.size
-            longest = max(w, h)
-            if longest < 1000:
-                scale = 1000 / longest
-                img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+            # Handle transparency first
             if img.mode in ('RGBA', 'P', 'LA'):
                 bg = Image.new('RGB', img.size, (255, 255, 255))
                 if img.mode == 'P':
@@ -716,8 +714,29 @@ def _download_and_convert(img_url):
                 img = bg
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
+
+            # Ensure BOTH dimensions are at least 1000px for Amazon
+            # Scale up so the shortest side reaches 1000px
+            w, h = img.size
+            if min(w, h) < 1000:
+                scale = 1000 / min(w, h)
+                new_w, new_h = int(w * scale), int(h * scale)
+                # Cap at 2000px max to avoid oversized images
+                if max(new_w, new_h) > 2000:
+                    scale = 2000 / max(w, h)
+                    new_w, new_h = int(w * scale), int(h * scale)
+                img = img.resize((max(new_w, 1000), max(new_h, 1000)), Image.LANCZOS)
+                w, h = img.size
+
+            # If still not 1000 on both sides (extreme aspect ratio), pad to square
+            if min(w, h) < 1000:
+                side = max(w, h, 1000)
+                bg = Image.new('RGB', (side, side), (255, 255, 255))
+                bg.paste(img, ((side - w) // 2, (side - h) // 2))
+                img = bg
+
             jpeg_buffer = BytesIO()
-            img.save(jpeg_buffer, format='JPEG', quality=92)
+            img.save(jpeg_buffer, format='JPEG', quality=92, dpi=(96, 96))
             return jpeg_buffer.getvalue()
         except Exception:
             return resp.content
@@ -878,13 +897,7 @@ def rehost_image(img_url):
     _save_image_locally(jpeg_bytes, img_url)
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
-    # Try freeimage.host first (iili.io CDN — no Cloudflare, Amazon-accessible)
-    hosted_url = _upload_to_freeimage(jpeg_bytes)
-    if hosted_url and _verify_hosted_image(hosted_url):
-        log.info(f"          [IMG] freeimage (iili.io): {hosted_url}")
-        return hosted_url
-
-    # Try imgbb as fallback
+    # Try imgbb first (reliable, Amazon-accessible, full-size URLs)
     try:
         import base64
         b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
@@ -907,6 +920,12 @@ def rehost_image(img_url):
         log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         log.info(f"          [IMG] imgbb error: {e}")
+
+    # Try freeimage.host as fallback
+    hosted_url = _upload_to_freeimage(jpeg_bytes)
+    if hosted_url and _verify_hosted_image(hosted_url):
+        log.info(f"          [IMG] freeimage (iili.io): {hosted_url}")
+        return hosted_url
 
     # Try Imgur as fallback
     hosted_url = _upload_to_imgur(jpeg_bytes)
@@ -969,6 +988,40 @@ def ali_to_gbp(price_usd):
     if sell_price < MIN_SELL_PRICE:
         sell_price = MIN_SELL_PRICE
     return sell_price
+
+
+def _has_trademark_risk(title):
+    """Check if title contains trademarked brand/team/player names that Amazon will reject."""
+    # Common trademarks that trigger error 18653 "Trademark Logo Misuse"
+    TRADEMARK_TERMS = [
+        # Football/Soccer players & teams
+        r'messi', r'ronaldo', r'cr7', r'mbapp[eé]', r'mbp', r'neymar', r'haaland',
+        r'vini\s*jr', r'vinicius', r'bellingham',
+        r'emirates', r'barcelona', r'real\s*madrid', r'man\s*utd', r'manchester',
+        r'liverpool', r'chelsea', r'arsenal', r'psg', r'juventus', r'bayern',
+        # Sports leagues
+        r'fifa', r'nba', r'nfl', r'premier\s*league', r'la\s*liga', r'champions\s*league',
+        # Major brands
+        r'nike', r'adidas', r'puma', r'supreme', r'gucci', r'louis\s*vuitton',
+        r'chanel', r'hermes', r'rolex', r'apple', r'samsung', r'sony',
+        r'nintendo', r'playstation', r'xbox', r'marvel', r'dc\s*comics',
+        r'disney', r'pokemon', r'pikachu', r'star\s*wars', r'harry\s*potter',
+        r'lego', r'transformers', r'barbie', r'hot\s*wheels',
+        # Anime (commonly enforced)
+        r'dragon\s*ball', r'naruto', r'one\s*piece', r'demon\s*slayer',
+        r'attack\s*on\s*titan', r'jujutsu\s*kaisen', r'my\s*hero\s*academia',
+    ]
+    title_lower = title.lower()
+    for term in TRADEMARK_TERMS:
+        # Use simple substring search for short terms (cr7, mbp, psg etc)
+        # and word boundary for longer terms to avoid false positives
+        if len(term.replace('\\s*', '').replace('[eé]', 'e')) <= 4:
+            if re.search(term, title_lower):
+                return True
+        else:
+            if re.search(r'\b' + term + r'\b', title_lower):
+                return True
+    return False
 
 
 def clean_title(title):
@@ -1100,7 +1153,14 @@ def fill_amazon_template(template_path, products):
 
     for product in products:
         pid = product.get("id", "")
-        title = clean_title(product.get("product_title", ""))
+        raw_title = product.get("product_title", "")
+        title = clean_title(raw_title)
+
+        # Skip products with trademarked brand/player/team names (error 18653)
+        if _has_trademark_risk(raw_title) or _has_trademark_risk(title):
+            log.warning(f"  SKIP trademark risk: {raw_title[:80]}")
+            continue
+
         price_str = product.get("product_price", "")
         images = product.get("rehosted_images", [])
         variations_raw = product.get("variations", "")
@@ -1479,11 +1539,19 @@ def fill_amazon_template(template_path, products):
             log.info("  Filled %d rows...", filled)
 
     # --- Output as tab-delimited text ---
+    # Only include columns that have a valid row3 header (field name).
+    # Empty headers cause Amazon error 90061 "field heading is invalid".
     max_col = ws.max_column or 308
+    valid_cols = []
+    for c in range(1, max_col + 1):
+        r3 = ws.cell(row=3, column=c).value
+        if r3 and str(r3).strip():
+            valid_cols.append(c)
+
     row1_vals = []
     row2_vals = []
     row3_vals = []
-    for c in range(1, max_col + 1):
+    for c in valid_cols:
         row1_vals.append(str(ws.cell(row=1, column=c).value or ""))
         row2_vals.append(str(ws.cell(row=2, column=c).value or ""))
         row3_vals.append(str(ws.cell(row=3, column=c).value or ""))
@@ -1491,7 +1559,7 @@ def fill_amazon_template(template_path, products):
     data_rows = []
     for r in range(start_row, start_row + filled):
         row_data = []
-        for c in range(1, max_col + 1):
+        for c in valid_cols:
             val = ws.cell(row=r, column=c).value
             row_data.append(str(val) if val is not None else "")
         data_rows.append(row_data)
