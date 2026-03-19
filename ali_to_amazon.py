@@ -825,6 +825,28 @@ def _upload_to_imgur(jpeg_bytes):
     return None
 
 
+def _upload_to_freeimage(jpeg_bytes):
+    """Upload JPEG bytes to freeimage.host (iili.io CDN). Returns direct URL or None."""
+    FREEIMAGE_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
+    try:
+        import base64
+        b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+        resp = http_requests.post(
+            "https://freeimage.host/api/1/upload",
+            data={"key": FREEIMAGE_API_KEY, "source": b64, "format": "json"},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            url = data.get("image", {}).get("url", "")
+            if url:
+                return url
+        log.info(f"          [IMG] freeimage response: {resp.status_code}")
+    except Exception as e:
+        log.info(f"          [IMG] freeimage error: {e}")
+    return None
+
+
 def rehost_image(img_url):
     """Download image, convert to JPEG, upload to hosting. Returns URL for Amazon."""
     if not img_url:
@@ -856,7 +878,13 @@ def rehost_image(img_url):
     _save_image_locally(jpeg_bytes, img_url)
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
-    # Try imgbb first (reliable, Amazon-compatible)
+    # Try freeimage.host first (iili.io CDN — no Cloudflare, Amazon-accessible)
+    hosted_url = _upload_to_freeimage(jpeg_bytes)
+    if hosted_url and _verify_hosted_image(hosted_url):
+        log.info(f"          [IMG] freeimage (iili.io): {hosted_url}")
+        return hosted_url
+
+    # Try imgbb as fallback
     try:
         import base64
         b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
@@ -867,8 +895,6 @@ def rehost_image(img_url):
         )
         if resp.status_code == 200:
             data = resp.json()
-            # Use display_url or image.url for DIRECT image link
-            # data.url is the viewer page (HTML), not the image itself
             img_data = data.get("data", {})
             url = (img_data.get("display_url", "")
                    or img_data.get("image", {}).get("url", "")
@@ -1189,14 +1215,11 @@ def fill_amazon_template(template_path, products):
             if c:
                 ws.cell(row=row, column=c, value=sell_price)
 
-            # Price GBP (UK) — also set on parent to avoid "Missing Offer"
+            # Price GBP (UK) — set on parent to avoid "Missing Offer"
             for field in col_map:
                 if "our_price" in field and "a1f83g8c2aro7p" in field:
                     ws.cell(row=row, column=col_map[field], value=sell_price)
                     break
-            c = col("business_price")
-            if c:
-                ws.cell(row=row, column=c, value=sell_price)
 
             # Fulfillment on parent too
             c = col("fulfillment_availability#1.fulfillment_channel_code")
@@ -1338,9 +1361,6 @@ def fill_amazon_template(template_path, products):
                 c = col("list_price_with_tax")
                 if c:
                     ws.cell(row=row, column=c, value=sell_price)
-                c = col("business_price")
-                if c:
-                    ws.cell(row=row, column=c, value=sell_price)
 
                 filled += 1
 
@@ -1448,9 +1468,6 @@ def fill_amazon_template(template_path, products):
                     ws.cell(row=row, column=col_map[field], value=sell_price)
                     break
             c = col("list_price_with_tax")
-            if c:
-                ws.cell(row=row, column=c, value=sell_price)
-            c = col("business_price")
             if c:
                 ws.cell(row=row, column=c, value=sell_price)
 
