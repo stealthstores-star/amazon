@@ -814,6 +814,23 @@ def handle_captcha(tab):
     """Auto-solve CAPTCHA if possible, otherwise wait for user. Returns when clear."""
     if not is_captcha(tab):
         return
+
+    # Ensure CAPTCHA is fully visible — expand viewport and scroll iframe into view
+    try:
+        vp = tab.viewport_size
+        if vp and vp.get("height", 0) < 1400:
+            tab.set_viewport_size({"width": vp.get("width", 1920), "height": 1400})
+    except Exception:
+        pass
+    try:
+        tab.evaluate("""() => {
+            const f = document.querySelector('iframe[src*="recaptcha"], iframe[src*="captcha"], iframe[src*="punch"]');
+            if (f) f.scrollIntoView({block: 'center'});
+            else window.scrollTo(0, 0);
+        }""")
+    except Exception:
+        pass
+
     # Try auto-solve up to 3 times
     auto_att = 0
     while is_captcha(tab) and auto_att < 3:
@@ -828,6 +845,10 @@ def handle_captcha(tab):
             break
     if not is_captcha(tab):
         log.info("  CAPTCHA auto-solved!")
+        try:
+            tab.set_viewport_size({"width": 1920, "height": 1080})
+        except Exception:
+            pass
         return
     # Manual solve needed
     log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
@@ -842,6 +863,11 @@ def handle_captcha(tab):
             except Exception:
                 pass
     log.info(">>> CAPTCHA solved! <<<")
+    # Restore normal viewport
+    try:
+        tab.set_viewport_size({"width": 1920, "height": 1080})
+    except Exception:
+        pass
 
 
 def is_login(tab):
