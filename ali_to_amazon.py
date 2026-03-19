@@ -588,11 +588,10 @@ def scrape_details_parallel(context, products, main_tab):
                 tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=15000)
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
-            # Brief pause between navigations (single tab, no proxy)
-            time.sleep(random.uniform(0.8, 1.5))
+            time.sleep(random.uniform(0.3, 0.6))
 
         # Wait for images to load
-        time.sleep(random.uniform(0.8, 1.2))
+        time.sleep(random.uniform(0.5, 0.8))
 
         # Check if any tab landed on CAPTCHA — if so, handle it and retry
         captcha_tabs = []
@@ -616,7 +615,7 @@ def scrape_details_parallel(context, products, main_tab):
                     tabs[i].goto(product["product_url"], wait_until="domcontentloaded", timeout=15000)
                 except Exception:
                     pass
-            time.sleep(random.uniform(1.0, 1.5))
+            time.sleep(random.uniform(0.5, 0.8))
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -2705,7 +2704,7 @@ def main():
                             log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
                             handle_captcha(tab)
                             detail_results.append(scrape_product_detail(tab, product_url, pid))
-                            time.sleep(random.uniform(0.8, 1.5))
+                            time.sleep(random.uniform(0.3, 0.6))
 
                     # Apply detail results to products
                     for p_idx, product in enumerate(products):
@@ -2804,7 +2803,7 @@ def main():
                         log.info("  Could not reach page %d — done.", pg)
                         break
 
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(random.uniform(0.5, 1.0))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
