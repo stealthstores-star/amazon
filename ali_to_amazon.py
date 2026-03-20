@@ -652,6 +652,19 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         p.close()
             except Exception:
                 pass
+
+        # Check for CAPTCHA on detail tab — pause until solved
+        if is_captcha(detail_tab):
+            handle_captcha(detail_tab)
+            # Also check main tab
+            if main_tab:
+                handle_captcha(main_tab)
+            # Re-navigate after CAPTCHA is solved
+            try:
+                detail_tab.goto(product_url, wait_until="domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+
         # Wait for product images to render
         try:
             detail_tab.wait_for_selector(
@@ -2915,9 +2928,22 @@ def main():
 
                 products = scroll_and_extract(tab)
 
-                if not products and pg > 1:
-                    log.info("  No products on page %d — done.", pg)
-                    break
+                # If no products found, check if CAPTCHA appeared during scrolling
+                if not products:
+                    if is_captcha(tab):
+                        log.warning("  CAPTCHA appeared during extraction — pausing...")
+                        handle_captcha(tab)
+                        # Re-navigate and retry extraction after CAPTCHA solved
+                        try:
+                            tab.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+                            wait_ready(tab, page_url)
+                            dismiss_popups(tab)
+                            products = scroll_and_extract(tab)
+                        except Exception:
+                            pass
+                    if not products and pg > 1:
+                        log.info("  No products on page %d — done.", pg)
+                        break
 
                 # --- Stop at low sales (< 5 sold) when sorted by orders ---
                 # Since results are sorted by orders desc, once we see < 5 sales
