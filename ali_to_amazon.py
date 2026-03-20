@@ -400,7 +400,7 @@ EXTRACT_JS = """
         }
 
         let sales = '';
-        const sm = cardText.match(/(\\d[\\d,\\.]*\\+?)\\s*[Ss]old/);
+        const sm = cardText.match(/(\\d[\\d,\\.]*[KkMm]?\\+?)\\s*[Ss]old/);
         if (sm) sales = sm[0].trim();
 
         if (['New arrivals','Hot deals','Related Searches','More to love',''].includes(title)) continue;
@@ -2926,11 +2926,17 @@ def main():
                 seen_any_sales = False
                 for p in products:
                     sales_str = p.get("total_sales", "") or p.get("trade_info", "") or ""
-                    # Parse "123 sold", "1,000+ sold", "5 sold" etc.
-                    m = re.match(r'([\d,\.]+)\+?\s*[Ss]old', sales_str)
+                    # Parse "123 sold", "1,000+ sold", "5 sold", "3K+ sold", "1.2K sold" etc.
+                    m = re.match(r'([\d,\.]+)\s*([KkMm])?\+?\s*[Ss]old', sales_str)
                     if m:
                         seen_any_sales = True
-                        sales_num = int(m.group(1).replace(",", "").replace(".", ""))
+                        raw_num = float(m.group(1).replace(",", ""))
+                        suffix = (m.group(2) or "").upper()
+                        if suffix == "K":
+                            raw_num *= 1000
+                        elif suffix == "M":
+                            raw_num *= 1000000
+                        sales_num = int(raw_num)
                         if sales_num < MIN_SALES_CUTOFF:
                             log.info("    Product '%s' has %d sales (< %d) — stopping this store.",
                                      p.get("product_title", "")[:60], sales_num, MIN_SALES_CUTOFF)
