@@ -1291,32 +1291,39 @@ def rehost_image(img_url):
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
     # Try imgbb first (reliable, Amazon-accessible, full-size URLs)
-    try:
-        import base64
-        b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
-        resp = http_requests.post(
-            "https://api.imgbb.com/1/upload",
-            data={"key": IMGBB_API_KEY, "image": b64},
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            img_data = data.get("data", {})
-            # IMPORTANT: use image.url (full-size original), NOT display_url
-            # display_url is a 640px thumbnail which fails Amazon's 1000px minimum
-            url = (img_data.get("image", {}).get("url", "")
-                   or img_data.get("display_url", "")
-                   or img_data.get("url", ""))
-            if url:
-                # Verify the uploaded image is accessible before returning
-                if _verify_hosted_image(url):
-                    log.info(f"          [IMG] imgbb: {url}")
-                    return url
-                else:
-                    log.warning(f"          [IMG] imgbb uploaded but not accessible: {url}")
-        log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
-    except Exception as e:
-        log.info(f"          [IMG] imgbb error: {e}")
+    # Skip if rate-limited (3+ consecutive failures)
+    if getattr(rehost_image, '_imgbb_fails', 0) < 3:
+        try:
+            import base64
+            b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+            resp = http_requests.post(
+                "https://api.imgbb.com/1/upload",
+                data={"key": IMGBB_API_KEY, "image": b64},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                img_data = data.get("data", {})
+                # IMPORTANT: use image.url (full-size original), NOT display_url
+                # display_url is a 640px thumbnail which fails Amazon's 1000px minimum
+                url = (img_data.get("image", {}).get("url", "")
+                       or img_data.get("display_url", "")
+                       or img_data.get("url", ""))
+                if url:
+                    # Verify the uploaded image is accessible before returning
+                    if _verify_hosted_image(url):
+                        log.info(f"          [IMG] imgbb: {url}")
+                        rehost_image._imgbb_fails = 0
+                        return url
+                    else:
+                        log.warning(f"          [IMG] imgbb uploaded but not accessible: {url}")
+            log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
+            rehost_image._imgbb_fails = getattr(rehost_image, '_imgbb_fails', 0) + 1
+            if rehost_image._imgbb_fails >= 3:
+                log.warning("          [IMG] imgbb rate-limited — skipping for remaining images")
+        except Exception as e:
+            log.info(f"          [IMG] imgbb error: {e}")
+            rehost_image._imgbb_fails = getattr(rehost_image, '_imgbb_fails', 0) + 1
 
     # Try freeimage.host as fallback
     hosted_url = _upload_to_freeimage(jpeg_bytes)
