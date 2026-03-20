@@ -2016,6 +2016,11 @@ def _fill_offer_fields(ws, row, col, col_map, sell_price):
     if c:
         ws.cell(row=row, column=c, value=sell_price)
 
+    # Business price — enables B2B offers and helps Featured Offer eligibility
+    c = col("business_price")
+    if c:
+        ws.cell(row=row, column=c, value=sell_price)
+
     # Condition
     c = col("condition_type")
     if c:
@@ -2380,8 +2385,7 @@ def fill_amazon_template(template_path, products):
                                "quantity_lower_bound2", "quantity_price2",
                                "quantity_lower_bound3", "quantity_price3",
                                "quantity_lower_bound4", "quantity_price4",
-                               "quantity_lower_bound5", "quantity_price5",
-                               "business_price"}
+                               "quantity_lower_bound5", "quantity_price5"}
 
     valid_cols = []
     for c in range(1, max_col + 1):
@@ -2439,6 +2443,7 @@ def fill_amazon_template(template_path, products):
     # This separate file forces offers onto existing listings.
     offer_fields_needed = [
         'feed_product_type', 'item_sku', 'update_delete', 'condition_type',
+        'list_price_with_tax', 'business_price',
         'fulfillment_availability#1.fulfillment_channel_code',
         'fulfillment_availability#1.quantity',
         'fulfillment_availability#1.lead_time_to_ship_max_days',
