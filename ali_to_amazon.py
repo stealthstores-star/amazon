@@ -1623,6 +1623,8 @@ def _has_trademark_risk(title):
         r'nintendo', r'playstation', r'xbox', r'marvel', r'dc\s*comics',
         r'disney', r'pokemon', r'pikachu', r'star\s*wars', r'harry\s*potter',
         r'lego', r'transformers', r'barbie', r'hot\s*wheels',
+        # Nintendo IP
+        r'zelda', r'link.*hyrule', r'hyrule', r'triforce', r'ganondorf', r'ganon',
         # Anime (commonly enforced)
         r'dragon\s*ball', r'naruto', r'one\s*piece', r'demon\s*slayer',
         r'attack\s*on\s*titan', r'jujutsu\s*kaisen', r'my\s*hero\s*academia',
