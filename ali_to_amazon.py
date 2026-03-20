@@ -630,41 +630,11 @@ DETAIL_EXTRACT_JS = """
 """
 
 
-# JS to click each thumbnail in the image gallery to trigger lazy loading
-CLICK_THUMBNAILS_JS = """
-() => {
-    // Find thumbnail containers on the left side of the gallery
-    const thumbSelectors = [
-        '.images-view-item',
-        '[class*="thumbnail"] img',
-        '[class*="slider"] img[src*="alicdn"]',
-        '[class*="gallery"] img[src*="alicdn"]',
-        '.images-view-wrap img',
-        '[class*="pic-gallery"] img',
-        '[class*="PicGallery"] img',
-    ];
-    let clicked = 0;
-    const clickedSrcs = new Set();
-    for (const sel of thumbSelectors) {
-        const els = document.querySelectorAll(sel);
-        for (const el of els) {
-            const src = el.getAttribute('src') || '';
-            if (clickedSrcs.has(src)) continue;
-            clickedSrcs.add(src);
-            try {
-                el.click();
-                clicked++;
-            } catch(e) {}
-        }
-        if (clicked > 0) break;  // Found thumbnails, stop trying other selectors
-    }
-    return clicked;
-}
-"""
+def scrape_product_detail(detail_tab, product_url, product_id, context=None, main_tab=None):
+    """Visit a product detail page and extract all images + variations.
 
-
-def scrape_product_detail(tab, product_url, product_id, context=None):
-    """Visit a product detail page and extract all images + variations."""
+    Uses detail_tab (a dedicated tab) so the main search results tab is untouched.
+    """
     result = {
         "all_images": [],
         "variations": [],
@@ -673,13 +643,18 @@ def scrape_product_detail(tab, product_url, product_id, context=None):
     }
 
     try:
-        tab.goto(product_url, wait_until="domcontentloaded", timeout=15000)
-        # Close any popup tabs that AliExpress opened
+        detail_tab.goto(product_url, wait_until="domcontentloaded", timeout=15000)
+        # Close any popup tabs that AliExpress opened (keep main + detail)
         if context:
-            close_extra_tabs(context, tab)
+            try:
+                for p in context.pages:
+                    if p != detail_tab and p != main_tab:
+                        p.close()
+            except Exception:
+                pass
         # Wait for product images to render
         try:
-            tab.wait_for_selector(
+            detail_tab.wait_for_selector(
                 'img[src*="alicdn"], [class*="gallery"], [class*="slider"]',
                 timeout=5000
             )
@@ -687,17 +662,9 @@ def scrape_product_detail(tab, product_url, product_id, context=None):
             pass
 
         # Dismiss any popups
-        dismiss_popups(tab)
+        dismiss_popups(detail_tab)
 
-        # Click through all thumbnails to trigger lazy-loading of full images
-        try:
-            thumb_count = tab.evaluate(CLICK_THUMBNAILS_JS)
-            if thumb_count > 1:
-                tab.wait_for_timeout(500)  # Let images load after clicking
-        except Exception:
-            pass
-
-        data = tab.evaluate(DETAIL_EXTRACT_JS)
+        data = detail_tab.evaluate(DETAIL_EXTRACT_JS)
 
         if data.get("images"):
             result["all_images"] = data["images"][:MAX_IMAGES]
@@ -711,9 +678,9 @@ def scrape_product_detail(tab, product_url, product_id, context=None):
         # If we only got 1 image, try scrolling and re-extracting
         if len(result["all_images"]) <= 1:
             try:
-                tab.evaluate("window.scrollTo(0, 300)")
-                tab.wait_for_timeout(800)
-                data2 = tab.evaluate(DETAIL_EXTRACT_JS)
+                detail_tab.evaluate("window.scrollTo(0, 300)")
+                detail_tab.wait_for_timeout(800)
+                data2 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
                 if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
                     result["all_images"] = data2["images"][:MAX_IMAGES]
             except Exception:
@@ -802,17 +769,6 @@ def scrape_details_parallel(context, products, main_tab):
                 except Exception:
                     pass
             time.sleep(random.uniform(3.0, 5.0))
-
-        # Click thumbnails on all tabs to trigger lazy loading
-        for i, product in enumerate(batch):
-            try:
-                tabs[i].evaluate(CLICK_THUMBNAILS_JS)
-            except Exception:
-                pass
-        try:
-            tabs[0].wait_for_timeout(500)
-        except Exception:
-            pass
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -3011,7 +2967,7 @@ def main():
                                 time.sleep(random.uniform(3.0, 5.0))
                             log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
                             handle_captcha(tab)
-                            detail_results.append(scrape_product_detail(detail_tab, product_url, pid, context=context))
+                            detail_results.append(scrape_product_detail(detail_tab, product_url, pid, context=context, main_tab=tab))
                             # Close any popup tabs AliExpress opened (keep main + detail)
                             try:
                                 for p in context.pages:
