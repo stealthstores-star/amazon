@@ -1232,15 +1232,22 @@ def scroll_and_extract(tab):
         pass
     products = extract(tab)
     stale = 0
-    max_stale = 5  # Allow more stale rounds — store pages need time to load batches
+    max_stale = 8  # More rounds — AliExpress AJAX can be slow to load next batch
     while stale < max_stale:
         try:
+            # Scroll to bottom, wait, then scroll up slightly and back down
+            # to trigger lazy-load observers that need scroll direction changes
             tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            tab.wait_for_timeout(800)  # Wait longer for AJAX batch to load
+            tab.wait_for_timeout(1500)
+            tab.evaluate("window.scrollBy(0, -500)")
+            tab.wait_for_timeout(500)
+            tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            tab.wait_for_timeout(1500)
         except Exception:
             break
         new = extract(tab)
         if len(new) > len(products):
+            log.info("    Infinite scroll: %d -> %d products", len(products), len(new))
             products = new
             stale = 0
         else:
@@ -3013,10 +3020,11 @@ def main():
 
                 if new_count == 0:
                     no_new_pages += 1
-                    # Store pages use infinite scroll — ?page=2 returns same products.
-                    # Stop immediately if all products on this page were duplicates.
-                    log.info("  No new products on page %d — done with this URL.", pg)
-                    break
+                    if no_new_pages >= 2:
+                        log.info("  No new products for %d consecutive pages — done with this URL.", no_new_pages)
+                        break
+                    else:
+                        log.info("  No new products on page %d — will try one more page.", pg)
                 else:
                     no_new_pages = 0
 
@@ -3031,19 +3039,31 @@ def main():
                 # Main tab is STILL on search results — just go to next page
                 pg += 1
                 log.info("  Navigating to page %d...", pg)
-                # Always use direct URL navigation — more reliable than clicking
-                # (the tab may have been on a product detail page)
-                next_page_url = sort_by_orders(url)
-                parsed = urlparse(next_page_url)
-                qs = parse_qs(parsed.query, keep_blank_values=True)
-                qs["page"] = [str(pg)]
-                next_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
-                try:
-                    tab.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
-                    wait_ready(tab, next_page_url)
-                except Exception:
-                    log.info("  Could not reach page %d — done.", pg)
-                    break
+
+                # Try clicking pagination button first (works for store pages
+                # where ?page=N URL param is ignored)
+                clicked = click_next(tab, pg - 1)
+                if clicked:
+                    log.info("    Clicked pagination button for page %d", pg)
+                    tab.wait_for_timeout(3000)
+                    # Wait for new content to load
+                    try:
+                        tab.wait_for_selector("a[href*='/item/']", timeout=8000)
+                    except Exception:
+                        pass
+                else:
+                    # Fall back to direct URL navigation
+                    next_page_url = sort_by_orders(url)
+                    parsed = urlparse(next_page_url)
+                    qs = parse_qs(parsed.query, keep_blank_values=True)
+                    qs["page"] = [str(pg)]
+                    next_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+                    try:
+                        tab.goto(next_page_url, wait_until="domcontentloaded", timeout=30000)
+                        wait_ready(tab, next_page_url)
+                    except Exception:
+                        log.info("  Could not reach page %d — done.", pg)
+                        break
 
                 time.sleep(random.uniform(3.0, 5.0))
 
