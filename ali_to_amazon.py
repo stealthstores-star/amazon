@@ -663,7 +663,7 @@ CLICK_THUMBNAILS_JS = """
 """
 
 
-def scrape_product_detail(tab, product_url, product_id):
+def scrape_product_detail(tab, product_url, product_id, context=None):
     """Visit a product detail page and extract all images + variations."""
     result = {
         "all_images": [],
@@ -674,6 +674,9 @@ def scrape_product_detail(tab, product_url, product_id):
 
     try:
         tab.goto(product_url, wait_until="domcontentloaded", timeout=15000)
+        # Close any popup tabs that AliExpress opened
+        if context:
+            close_extra_tabs(context, tab)
         # Wait for product images to render
         try:
             tab.wait_for_selector(
@@ -1224,6 +1227,23 @@ def dismiss_popups(tab):
                 tab.wait_for_timeout(100)
         except Exception:
             pass
+
+
+def close_extra_tabs(context, keep_tab):
+    """Close any tabs/popups that aren't the main tab.
+
+    AliExpress product pages often open popup tabs via JavaScript.
+    These accumulate and slow down the browser.
+    """
+    try:
+        for page in context.pages:
+            if page != keep_tab:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 SCROLL_JS = """
@@ -2984,7 +3004,7 @@ def main():
                             time.sleep(random.uniform(3.0, 5.0))
                         log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
                         handle_captcha(tab)
-                        detail_results.append(scrape_product_detail(tab, product_url, pid))
+                        detail_results.append(scrape_product_detail(tab, product_url, pid, context=context))
 
                     # Apply detail results to products
                     for p_idx, product in enumerate(products):
@@ -3022,6 +3042,9 @@ def main():
                     break
 
                 # --- Navigate to next page ---
+                # Close any popup tabs AliExpress may have opened
+                close_extra_tabs(context, tab)
+
                 # After detail scraping, main tab is on a product page.
                 # Navigate directly back to the current search results page URL.
                 current_page_url = sort_by_orders(url)
