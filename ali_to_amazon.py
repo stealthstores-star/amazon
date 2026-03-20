@@ -1211,26 +1211,32 @@ async () => {
     while (y < h) {
         y += step;
         window.scrollTo(0, y);
-        await delay(80);
+        await delay(150);
         h = document.body.scrollHeight;
     }
     window.scrollTo(0, document.body.scrollHeight);
-    await delay(150);
+    await delay(300);
 }
 """
 
 
 def scroll_and_extract(tab):
+    """Scroll page to trigger infinite-scroll loading, then extract products.
+
+    For store pages, AliExpress loads ~40 products at a time via infinite scroll.
+    We keep scrolling until no new products appear for several rounds.
+    """
     try:
         tab.evaluate(SCROLL_JS)
     except Exception:
         pass
     products = extract(tab)
     stale = 0
-    while stale < 2:
+    max_stale = 5  # Allow more stale rounds — store pages need time to load batches
+    while stale < max_stale:
         try:
             tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            tab.wait_for_timeout(300)
+            tab.wait_for_timeout(800)  # Wait longer for AJAX batch to load
         except Exception:
             break
         new = extract(tab)
@@ -3007,9 +3013,10 @@ def main():
 
                 if new_count == 0:
                     no_new_pages += 1
-                    if no_new_pages >= 2 or (skipped > 0 and len(products) == 0):
-                        log.info("  No new products for %d page(s) — done with this URL.", no_new_pages)
-                        break
+                    # Store pages use infinite scroll — ?page=2 returns same products.
+                    # Stop immediately if all products on this page were duplicates.
+                    log.info("  No new products on page %d — done with this URL.", pg)
+                    break
                 else:
                     no_new_pages = 0
 
