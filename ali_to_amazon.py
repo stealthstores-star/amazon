@@ -400,7 +400,7 @@ EXTRACT_JS = """
         }
 
         let sales = '';
-        const sm = cardText.match(/(\\d[\\d,\\.]*[KkMm]?\\+?)\\s*[Ss]old/);
+        const sm = cardText.match(/(\\d[\\d,\\.]*[KkMm]?\\+?)\\s*[Ss]old(?![a-zA-Z])/);
         if (sm) sales = sm[0].trim();
 
         if (['New arrivals','Hot deals','Related Searches','More to love',''].includes(title)) continue;
