@@ -238,7 +238,64 @@ def sort_by_orders(url):
     parsed = urlparse(url)
     qs = parse_qs(parsed.query, keep_blank_values=True)
     qs["SortType"] = ["total_tranpro_desc"]
+    qs["sortType"] = ["orders_desc"]
+    qs["shop_sortType"] = ["orders_desc"]
     return urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
+
+
+CLICK_ORDERS_SORT_JS = """
+() => {
+    // Find and click the "Orders" sort tab on store pages
+    const sortItems = document.querySelectorAll(
+        '[class*="sort"] a, [class*="Sort"] a, [class*="sort"] span, [class*="Sort"] span, ' +
+        '[class*="tab"] a, [class*="Tab"] a'
+    );
+    for (const el of sortItems) {
+        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+        if (text === 'orders' || text === 'order' || text === 'orders ↓') {
+            el.click();
+            return true;
+        }
+    }
+    // Broader search: any clickable element with "Orders" text in sort/filter areas
+    const allEls = document.querySelectorAll('a, span, div, button');
+    for (const el of allEls) {
+        const text = (el.innerText || el.textContent || '').trim();
+        if (text === 'Orders' || text === 'orders') {
+            // Make sure it's a sort button (near other sort options like "Best Match", "New", "Price")
+            const parent = el.parentElement;
+            if (parent) {
+                const parentText = parent.innerText || '';
+                if (/best\\s*match|new|price/i.test(parentText)) {
+                    el.click();
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+"""
+
+
+def click_orders_sort(tab):
+    """Click the 'Orders' sort tab on store pages."""
+    try:
+        clicked = tab.evaluate(CLICK_ORDERS_SORT_JS)
+        if clicked:
+            log.info("  Clicked 'Orders' sort tab")
+            tab.wait_for_timeout(2000)
+            # Wait for page to reload with sorted results
+            try:
+                tab.wait_for_selector("a[href*='/item/']", timeout=8000)
+            except Exception:
+                pass
+            return True
+        else:
+            log.info("  'Orders' sort tab not found (URL params may handle it)")
+    except Exception as e:
+        log.info("  Could not click Orders sort: %s", e)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1326,21 +1383,37 @@ def rehost_image(img_url):
             rehost_image._imgbb_fails = getattr(rehost_image, '_imgbb_fails', 0) + 1
 
     # Try freeimage.host as fallback
-    hosted_url = _upload_to_freeimage(jpeg_bytes)
-    if hosted_url and _verify_hosted_image(hosted_url):
-        log.info(f"          [IMG] freeimage (iili.io): {hosted_url}")
-        return hosted_url
+    if getattr(rehost_image, '_freeimage_fails', 0) < 5:
+        hosted_url = _upload_to_freeimage(jpeg_bytes)
+        if hosted_url and _verify_hosted_image(hosted_url):
+            log.info(f"          [IMG] freeimage (iili.io): {hosted_url}")
+            rehost_image._freeimage_fails = 0
+            return hosted_url
+        rehost_image._freeimage_fails = getattr(rehost_image, '_freeimage_fails', 0) + 1
+        if rehost_image._freeimage_fails >= 5:
+            log.warning("          [IMG] freeimage rate-limited — skipping for remaining images")
 
     # Try Imgur as fallback
-    hosted_url = _upload_to_imgur(jpeg_bytes)
-    if hosted_url and _verify_hosted_image(hosted_url):
-        log.info(f"          [IMG] Imgur: {hosted_url}")
-        return hosted_url
+    if getattr(rehost_image, '_imgur_fails', 0) < 5:
+        hosted_url = _upload_to_imgur(jpeg_bytes)
+        if hosted_url and _verify_hosted_image(hosted_url):
+            log.info(f"          [IMG] Imgur: {hosted_url}")
+            rehost_image._imgur_fails = 0
+            return hosted_url
+        rehost_image._imgur_fails = getattr(rehost_image, '_imgur_fails', 0) + 1
+        if rehost_image._imgur_fails >= 5:
+            log.warning("          [IMG] Imgur rate-limited — skipping for remaining images")
 
     # Try catbox as last resort
     hosted_url = _upload_to_catbox(jpeg_bytes)
     if hosted_url and _verify_hosted_image(hosted_url):
         log.info(f"          [IMG] catbox: {hosted_url}")
+        return hosted_url
+
+    # Try litterbox as absolute last resort
+    hosted_url = _upload_to_litterbox(jpeg_bytes)
+    if hosted_url and _verify_hosted_image(hosted_url):
+        log.info(f"          [IMG] litterbox: {hosted_url}")
         return hosted_url
 
     log.warning(f"          [IMG] All hosting failed for: {img_url[:80]}")
@@ -2364,12 +2437,12 @@ def post_process(csv_path):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-    log.info("  %d images to rehost across %d products (parallel, 6 workers)...",
+    log.info("  %d images to rehost across %d products (parallel, 3 workers)...",
              len(upload_tasks), len(resin_rows))
 
     # Run uploads in parallel
     results = {}  # task_index -> new_url
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         future_map = {pool.submit(rehost_image, task[3]): i for i, task in enumerate(upload_tasks)}
         for future in as_completed(future_map):
             idx = future_map[future]
@@ -2670,6 +2743,8 @@ def main():
                     continue
 
             pg = 1
+            orders_sorted = False
+            low_sales_stop = False
             while pg <= MAX_PAGES:
                 log.info("  Page %d", pg)
                 # Build page-specific URL so CAPTCHA recovery returns to correct page
@@ -2681,11 +2756,45 @@ def main():
                     page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
                 wait_ready(tab, page_url)
                 dismiss_popups(tab)
+
+                # On first page, click "Orders" sort button if available
+                if pg == 1 and not orders_sorted:
+                    click_orders_sort(tab)
+                    orders_sorted = True
+                    # Re-extract after sorting
+                    tab.wait_for_timeout(1000)
+
                 products = scroll_and_extract(tab)
 
                 if not products and pg > 1:
                     log.info("  No products on page %d — done.", pg)
                     break
+
+                # --- Stop at low sales (< 5 sold) when sorted by orders ---
+                # Since results are sorted by orders desc, once we see < 5 sales
+                # all remaining products will also have < 5, so stop this URL.
+                MIN_SALES_CUTOFF = 5
+                filtered_products = []
+                for p in products:
+                    sales_str = p.get("total_sales", "") or p.get("trade_info", "") or ""
+                    # Parse "123 sold", "1,000+ sold", "5 sold" etc.
+                    m = re.match(r'([\d,\.]+)\+?\s*[Ss]old', sales_str)
+                    if m:
+                        sales_num = int(m.group(1).replace(",", "").replace(".", ""))
+                        if sales_num < MIN_SALES_CUTOFF:
+                            log.info("    Product '%s' has %d sales (< %d) — stopping this store.",
+                                     p.get("product_title", "")[:60], sales_num, MIN_SALES_CUTOFF)
+                            low_sales_stop = True
+                            break
+                    filtered_products.append(p)
+                products = filtered_products
+
+                if low_sales_stop:
+                    if products:
+                        # Still process the products we collected before the cutoff
+                        log.info("    Processing %d products before cutoff...", len(products))
+                    else:
+                        break
 
                 # --- Apply limit ---
                 if args.limit > 0:
@@ -2734,6 +2843,10 @@ def main():
 
                 if new_count == 0 and pg > 2:
                     log.info("  No new products — done with this URL.")
+                    break
+
+                if low_sales_stop:
+                    log.info("  Low sales cutoff reached — moving to next URL.")
                     break
 
                 # --- Navigate to next page ---
