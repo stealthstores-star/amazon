@@ -203,17 +203,55 @@ FIELDS = [
 
 
 class LiveCSV:
-    def __init__(self, path):
+    def __init__(self, path, resume=False):
         self.path = path
         self.count = 0
         self._seen = set()
-        self._f = open(path, "w", newline="", encoding="utf-8")
-        self._w = csv.DictWriter(self._f, fieldnames=FIELDS, extrasaction="ignore")
-        self._w.writeheader()
+        self._seen_urls = {}  # source_url -> count of products from that URL
+
+        if resume and os.path.exists(path):
+            # Load existing data to resume
+            try:
+                with open(path, "r", newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        pid = row.get("id", "")
+                        if pid:
+                            self._seen.add(pid)
+                            self.count += 1
+                            src = row.get("source_url", "")
+                            if src:
+                                self._seen_urls[src] = self._seen_urls.get(src, 0) + 1
+                log.info("  Resuming: loaded %d existing products from %s", self.count, path)
+                if self._seen_urls:
+                    for u, c in self._seen_urls.items():
+                        log.info("    %s: %d products", u[:80], c)
+            except Exception as e:
+                log.warning("  Could not read existing CSV for resume: %s", e)
+                self._seen.clear()
+                self._seen_urls.clear()
+                self.count = 0
+
+            # Open in append mode (no header needed)
+            self._f = open(path, "a", newline="", encoding="utf-8")
+            self._w = csv.DictWriter(self._f, fieldnames=FIELDS, extrasaction="ignore")
+        else:
+            self._f = open(path, "w", newline="", encoding="utf-8")
+            self._w = csv.DictWriter(self._f, fieldnames=FIELDS, extrasaction="ignore")
+            self._w.writeheader()
         self._f.flush()
+
+    def already_scraped(self, product_id):
+        """Check if a product has already been scraped."""
+        return product_id in self._seen
+
+    def url_product_count(self, url):
+        """Get how many products have been scraped from a URL."""
+        return self._seen_urls.get(url, 0)
 
     def add(self, rows, source_url):
         dupes = 0
+        new = 0
         for r in rows:
             pid = r.get("id", "")
             if pid in self._seen:
@@ -223,9 +261,12 @@ class LiveCSV:
             r["source_url"] = source_url
             self._w.writerow(r)
             self.count += 1
+            new += 1
+            self._seen_urls[source_url] = self._seen_urls.get(source_url, 0) + 1
         self._f.flush()
         if dupes:
-            log.info("  Skipped %d duplicate products", dupes)
+            log.info("  Skipped %d duplicate products (already scraped)", dupes)
+        return new
 
     def close(self):
         self._f.close()
@@ -2635,6 +2676,8 @@ def main():
                         help="Proxy server URL (e.g. http://user:pass@host:port or socks5://host:port)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit total number of products to scrape (0 = no limit)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from existing CSV — skip already-scraped products")
     args = parser.parse_args()
 
     lines = Path(args.urls_file).read_text().splitlines()
@@ -2645,8 +2688,16 @@ def main():
 
     ts = datetime.now().strftime("%Y-%m-%d_%H%M")
     out = args.output or f"aliexpress_scrape_{ts}.csv"
-    csv_out = LiveCSV(out)
-    log.info("Output: %s", out)
+
+    # Auto-detect resume: if output file exists and --resume not explicitly set,
+    # check if there's data to resume from
+    resume = args.resume
+    if not resume and args.output and os.path.exists(args.output):
+        resume = True
+        log.info("Existing output file found — auto-resuming.")
+
+    csv_out = LiveCSV(out, resume=resume)
+    log.info("Output: %s (%d products already scraped)", out, csv_out.count)
 
     # Start local proxy forwarders for SOCKS5 proxies
     proxy_local_urls = []
@@ -2846,6 +2897,7 @@ def main():
             pg = 1
             orders_sorted = False
             low_sales_stop = False
+            no_new_pages = 0
             while pg <= MAX_PAGES:
                 log.info("  Page %d", pg)
                 # Build page-specific URL so CAPTCHA recovery returns to correct page
@@ -2905,6 +2957,13 @@ def main():
                     else:
                         break
 
+                # --- Skip already-scraped products (resume support) ---
+                before_skip = len(products)
+                products = [p for p in products if not csv_out.already_scraped(p.get("id", ""))]
+                skipped = before_skip - len(products)
+                if skipped:
+                    log.info("    Skipped %d already-scraped products", skipped)
+
                 # --- Apply limit ---
                 if args.limit > 0:
                     remaining = args.limit - csv_out.count
@@ -2915,7 +2974,7 @@ def main():
 
                 # --- Visit each product detail page for ALL images + variations ---
                 used_sequential = True
-                if not args.skip_details:
+                if not args.skip_details and products:
                     detail_results = []
                     for p_idx, product in enumerate(products):
                         pid = product["id"]
@@ -2950,9 +3009,13 @@ def main():
                     log.info("  Reached product limit (%d). Stopping.", args.limit)
                     break
 
-                if new_count == 0 and pg > 2:
-                    log.info("  No new products — done with this URL.")
-                    break
+                if new_count == 0:
+                    no_new_pages += 1
+                    if no_new_pages >= 2 or (skipped > 0 and len(products) == 0):
+                        log.info("  No new products for %d page(s) — done with this URL.", no_new_pages)
+                        break
+                else:
+                    no_new_pages = 0
 
                 if low_sales_stop:
                     log.info("  Low sales cutoff reached — moving to next URL.")
