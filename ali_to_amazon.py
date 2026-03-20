@@ -420,8 +420,73 @@ DETAIL_EXTRACT_JS = """
         originalPrice: '',
     };
 
-    // --- Get ALL product images ---
-    // Strategy 1: Look for image gallery/carousel thumbnails
+    // Helper: clean an image URL to get full-size version
+    function cleanImgUrl(src) {
+        if (!src) return '';
+        src = src.replace(/_\\d+x\\d+[^.]*\\./g, '.');
+        src = src.replace(/\\.(jpg|png|jpeg|webp)_\\d+x\\d+[^.]*/gi, '.$1');
+        // Remove .webp suffix to get .jpg (Amazon needs JPEG)
+        src = src.replace(/\\.webp$/i, '.jpg');
+        if (src.startsWith('//')) src = 'https:' + src;
+        return src;
+    }
+
+    const imgSet = new Set();
+    function addImage(src) {
+        src = cleanImgUrl(src);
+        if (!src) return;
+        if (src.includes('placeholder') || src.includes('48x48') || src.includes('avatar')
+            || src.includes('icon') || src.includes('logo') || src.includes('flag-icon')) return;
+        if (!src.includes('alicdn.com') && !src.includes('ae01.') && !src.includes('ae04.')) return;
+        // Deduplicate by the core filename (ignore size suffixes)
+        const key = src.replace(/https?:\\/\\/[^/]+/, '').replace(/_\\d+x\\d+/g, '');
+        if (imgSet.has(key)) return;
+        imgSet.add(key);
+        result.images.push(src);
+    }
+
+    // --- Strategy 1 (BEST): Extract from page data / runParams / SSR data ---
+    // AliExpress embeds product data in script tags as JSON
+    const html = document.documentElement.innerHTML;
+
+    // Look for imagePathList in any script or data attribute
+    const imgListPatterns = [
+        /"imagePathList"\\s*:\\s*\\[([^\\]]+)\\]/,
+        /"imagePath(?:List|s)"\\s*:\\s*\\[([^\\]]+)\\]/,
+        /"productImageList"\\s*:\\s*\\[([^\\]]+)\\]/,
+    ];
+    for (const pattern of imgListPatterns) {
+        const match = html.match(pattern);
+        if (match) {
+            const urls = match[1].match(/"((?:https?:|\\/)?\\/\\/[^"]+)"/g);
+            if (urls) {
+                for (let url of urls) {
+                    url = url.replace(/"/g, '').replace(/\\\\/g, '/');
+                    addImage(url);
+                }
+            }
+        }
+    }
+
+    // Also look for individual image URLs in data patterns
+    const imgUrlPattern = /(?:https?:)?\\/\\/[a-z0-9]+\\.alicdn\\.com\\/[^"'\\s,}]+\\.(?:jpg|jpeg|png|webp)/gi;
+    // Only search in script tags (not the whole page, to avoid noise)
+    const scripts = document.querySelectorAll('script');
+    for (const script of scripts) {
+        const text = script.textContent || '';
+        if (text.length < 100) continue;
+        // Only look in scripts that seem to contain product data
+        if (!text.includes('imagePathList') && !text.includes('imagePath') &&
+            !text.includes('productImage') && !text.includes('skuAttr')) continue;
+        const matches = text.match(imgUrlPattern);
+        if (matches) {
+            for (const url of matches) {
+                addImage(url);
+            }
+        }
+    }
+
+    // --- Strategy 2: Gallery DOM elements ---
     const gallerySelectors = [
         '.image-view-magnifier-wrap img',
         '.images-view-item img',
@@ -430,74 +495,41 @@ DETAIL_EXTRACT_JS = """
         '[class*="image-view"] img',
         '.product-image-panel img',
         '.mag-img img',
-        // Thumbnail strip
         '[class*="thumbnail"] img[src*="alicdn"]',
         '.images-view-wrap img',
+        '[class*="PicGallery"] img',
+        '[class*="pic-gallery"] img',
+        '[class*="product-image"] img',
+        // Modern AliExpress layouts
+        'div[class*="gallery"] img',
+        'div[class*="slider"] img',
+        'picture source[srcset*="alicdn"]',
     ];
-    const imgSet = new Set();
 
     for (const sel of gallerySelectors) {
-        const imgs = document.querySelectorAll(sel);
-        for (const img of imgs) {
-            let src = img.getAttribute('src') || img.getAttribute('data-src') || '';
-            if (!src || src.includes('placeholder') || src.includes('48x48')) continue;
-            // Clean up thumbnail URLs to get full size
-            // AliExpress uses _50x50.jpg_ or _120x120.jpg_ for thumbnails
-            src = src.replace(/_\d+x\d+[^.]*\./g, '.');
-            // Remove any size suffix like .jpg_50x50.jpg
-            src = src.replace(/\.(jpg|png|jpeg)_\d+x\d+[^.]*/gi, '.$1');
-            // Ensure https
-            if (src.startsWith('//')) src = 'https:' + src;
-            if (src.includes('alicdn.com') && !imgSet.has(src)) {
-                imgSet.add(src);
-                result.images.push(src);
+        try {
+            const els = document.querySelectorAll(sel);
+            for (const el of els) {
+                // Check img src, data-src, srcset
+                const src = el.getAttribute('src') || el.getAttribute('data-src') ||
+                            el.getAttribute('srcset') || '';
+                addImage(src);
             }
-        }
+        } catch(e) {}
     }
 
-    // Strategy 2: Look in page scripts for image data (most reliable)
-    const scripts = document.querySelectorAll('script');
-    for (const script of scripts) {
-        const text = script.textContent || '';
-        // Look for imagePathList or similar
-        const imgListMatch = text.match(/"imagePathList"\\s*:\\s*\\[([^\\]]+)\\]/);
-        if (imgListMatch) {
-            const urls = imgListMatch[1].match(/"(https?:[^"]+)"/g);
-            if (urls) {
-                for (let url of urls) {
-                    url = url.replace(/"/g, '');
-                    if (url.startsWith('//')) url = 'https:' + url;
-                    url = url.replace(/_\d+x\d+[^.]*\\./g, '.');
-                    if (!imgSet.has(url)) {
-                        imgSet.add(url);
-                        result.images.push(url);
-                    }
-                }
-            }
-        }
-    }
-
-    // Strategy 3: Look for any large product images on the page
-    const allImgs = document.querySelectorAll('img[src*="alicdn.com"]');
+    // --- Strategy 3: Any large alicdn images on page ---
+    const allImgs = document.querySelectorAll('img[src*="alicdn"], img[data-src*="alicdn"]');
     for (const img of allImgs) {
-        let src = img.getAttribute('src') || '';
-        if (!src || src.includes('avatar') || src.includes('icon') || src.includes('logo')) continue;
-        if (src.includes('48x48') || src.includes('placeholder')) continue;
-        // Only include reasonably sized images
+        const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+        // Only include reasonably sized images (skip tiny icons)
         const rect = img.getBoundingClientRect();
-        if (rect.width < 80 && rect.height < 80 && !src.includes('_50x50') && !src.includes('_120x120')) continue;
-
-        src = src.replace(/_\d+x\d+[^.]*\\./g, '.');
-        src = src.replace(/\\.(jpg|png|jpeg)_\d+x\d+[^.]*/gi, '.$1');
-        if (src.startsWith('//')) src = 'https:' + src;
-        if (!imgSet.has(src)) {
-            imgSet.add(src);
-            result.images.push(src);
+        if (rect.width >= 60 || rect.height >= 60 || src.includes('_50x50') || src.includes('_120x120')) {
+            addImage(src);
         }
     }
 
     // --- Get variations (SKU properties) ---
-    // Look for variation/SKU selectors
     const varContainers = document.querySelectorAll(
         '[class*="sku-property"], [class*="product-sku"], [class*="sku-wrap"], ' +
         '[class*="product-prop"], [class*="variation"]'
@@ -523,11 +555,7 @@ DETAIL_EXTRACT_JS = """
                          (img ? img.getAttribute('alt') : '') || '';
             let imgUrl = '';
             if (img) {
-                imgUrl = img.getAttribute('src') || img.getAttribute('data-src') || '';
-                if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
-                // Get full size version
-                imgUrl = imgUrl.replace(/_\d+x\d+[^.]*\\./g, '.');
-                imgUrl = imgUrl.replace(/\\.(jpg|png|jpeg)_\d+x\d+[^.]*/gi, '.$1');
+                imgUrl = cleanImgUrl(img.getAttribute('src') || img.getAttribute('data-src') || '');
             }
             if (text || imgUrl) {
                 options.push({ name: text.substring(0, 100), image: imgUrl });
@@ -561,6 +589,39 @@ DETAIL_EXTRACT_JS = """
 """
 
 
+# JS to click each thumbnail in the image gallery to trigger lazy loading
+CLICK_THUMBNAILS_JS = """
+() => {
+    // Find thumbnail containers on the left side of the gallery
+    const thumbSelectors = [
+        '.images-view-item',
+        '[class*="thumbnail"] img',
+        '[class*="slider"] img[src*="alicdn"]',
+        '[class*="gallery"] img[src*="alicdn"]',
+        '.images-view-wrap img',
+        '[class*="pic-gallery"] img',
+        '[class*="PicGallery"] img',
+    ];
+    let clicked = 0;
+    const clickedSrcs = new Set();
+    for (const sel of thumbSelectors) {
+        const els = document.querySelectorAll(sel);
+        for (const el of els) {
+            const src = el.getAttribute('src') || '';
+            if (clickedSrcs.has(src)) continue;
+            clickedSrcs.add(src);
+            try {
+                el.click();
+                clicked++;
+            } catch(e) {}
+        }
+        if (clicked > 0) break;  // Found thumbnails, stop trying other selectors
+    }
+    return clicked;
+}
+"""
+
+
 def scrape_product_detail(tab, product_url, product_id):
     """Visit a product detail page and extract all images + variations."""
     result = {
@@ -571,15 +632,26 @@ def scrape_product_detail(tab, product_url, product_id):
     }
 
     try:
-        tab.goto(product_url, wait_until="commit", timeout=10000)
-        # Wait for product content to render
+        tab.goto(product_url, wait_until="domcontentloaded", timeout=15000)
+        # Wait for product images to render
         try:
-            tab.wait_for_selector('img[src*="alicdn"]', timeout=2000)
+            tab.wait_for_selector(
+                'img[src*="alicdn"], [class*="gallery"], [class*="slider"]',
+                timeout=5000
+            )
         except Exception:
             pass
 
         # Dismiss any popups
         dismiss_popups(tab)
+
+        # Click through all thumbnails to trigger lazy-loading of full images
+        try:
+            thumb_count = tab.evaluate(CLICK_THUMBNAILS_JS)
+            if thumb_count > 1:
+                tab.wait_for_timeout(500)  # Let images load after clicking
+        except Exception:
+            pass
 
         data = tab.evaluate(DETAIL_EXTRACT_JS)
 
@@ -591,6 +663,17 @@ def scrape_product_detail(tab, product_url, product_id):
             result["detail_title"] = data["title"]
         if data.get("price"):
             result["detail_price"] = data["price"]
+
+        # If we only got 1 image, try scrolling and re-extracting
+        if len(result["all_images"]) <= 1:
+            try:
+                tab.evaluate("window.scrollTo(0, 300)")
+                tab.wait_for_timeout(800)
+                data2 = tab.evaluate(DETAIL_EXTRACT_JS)
+                if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
+                    result["all_images"] = data2["images"][:MAX_IMAGES]
+            except Exception:
+                pass
 
     except Exception as e:
         log.debug("  Detail scrape failed for %s: %s", product_id, str(e)[:80])
@@ -642,15 +725,15 @@ def scrape_details_parallel(context, products, main_tab):
             idx = batch_start + i
             log.info("    [%d/%d] Fetching details for %s...", idx + 1, len(products), pid)
             try:
-                tabs[i].goto(product_url, wait_until="commit", timeout=10000)
+                tabs[i].goto(product_url, wait_until="domcontentloaded", timeout=15000)
             except Exception as e:
                 log.debug("  Detail nav failed for %s: %s", pid, str(e)[:80])
 
         # Wait for content to render
         try:
-            tabs[0].wait_for_selector('img[src*="alicdn"], [class*="gallery"], [class*="image"]', timeout=3000)
+            tabs[0].wait_for_selector('img[src*="alicdn"], [class*="gallery"], [class*="slider"]', timeout=5000)
         except Exception:
-            time.sleep(0.5)
+            time.sleep(1.0)
 
         # Check if any tab landed on CAPTCHA — if so, handle it and retry
         captcha_tabs = []
@@ -675,6 +758,17 @@ def scrape_details_parallel(context, products, main_tab):
                 except Exception:
                     pass
             time.sleep(random.uniform(3.0, 5.0))
+
+        # Click thumbnails on all tabs to trigger lazy loading
+        for i, product in enumerate(batch):
+            try:
+                tabs[i].evaluate(CLICK_THUMBNAILS_JS)
+            except Exception:
+                pass
+        try:
+            tabs[0].wait_for_timeout(500)
+        except Exception:
+            pass
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -702,6 +796,13 @@ def scrape_details_parallel(context, products, main_tab):
                     result["detail_title"] = data["title"]
                 if data.get("price"):
                     result["detail_price"] = data["price"]
+                # If only 1 image, scroll and retry
+                if len(result["all_images"]) <= 1:
+                    tabs[i].evaluate("window.scrollTo(0, 300)")
+                    tabs[i].wait_for_timeout(800)
+                    data2 = tabs[i].evaluate(DETAIL_EXTRACT_JS)
+                    if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
+                        result["all_images"] = data2["images"][:MAX_IMAGES]
             except Exception as e:
                 log.debug("  Detail scrape failed for %s: %s", pid, str(e)[:80])
             results[idx] = result
@@ -2773,25 +2874,33 @@ def main():
                 # --- Stop at low sales (< 5 sold) when sorted by orders ---
                 # Since results are sorted by orders desc, once we see < 5 sales
                 # all remaining products will also have < 5, so stop this URL.
+                # Include products with >= 5 sales, stop at the first with < 5.
                 MIN_SALES_CUTOFF = 5
                 filtered_products = []
+                seen_any_sales = False
                 for p in products:
                     sales_str = p.get("total_sales", "") or p.get("trade_info", "") or ""
                     # Parse "123 sold", "1,000+ sold", "5 sold" etc.
                     m = re.match(r'([\d,\.]+)\+?\s*[Ss]old', sales_str)
                     if m:
+                        seen_any_sales = True
                         sales_num = int(m.group(1).replace(",", "").replace(".", ""))
                         if sales_num < MIN_SALES_CUTOFF:
                             log.info("    Product '%s' has %d sales (< %d) — stopping this store.",
                                      p.get("product_title", "")[:60], sales_num, MIN_SALES_CUTOFF)
                             low_sales_stop = True
                             break
+                    elif seen_any_sales:
+                        # No sales text after seeing products with sales = 0 sales
+                        log.info("    Product '%s' has no sales data — stopping this store.",
+                                 p.get("product_title", "")[:60])
+                        low_sales_stop = True
+                        break
                     filtered_products.append(p)
                 products = filtered_products
 
                 if low_sales_stop:
                     if products:
-                        # Still process the products we collected before the cutoff
                         log.info("    Processing %d products before cutoff...", len(products))
                     else:
                         break
