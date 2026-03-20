@@ -2993,32 +2993,52 @@ def main():
                     products = products[:remaining]
 
                 # --- Visit each product detail page for ALL images + variations ---
-                used_sequential = True
+                # Use a SEPARATE tab for detail scraping — never navigate the main tab
+                # away from search results.
                 if not args.skip_details and products:
-                    detail_results = []
-                    for p_idx, product in enumerate(products):
-                        pid = product["id"]
-                        product_url = product["product_url"]
-                        # Wait BEFORE each fetch — human browsing pace
-                        if p_idx > 0:
-                            time.sleep(random.uniform(3.0, 5.0))
-                        log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
-                        handle_captcha(tab)
-                        detail_results.append(scrape_product_detail(tab, product_url, pid, context=context))
+                    detail_tab = None
+                    try:
+                        detail_tab = context.new_page()
+                    except Exception as e:
+                        log.warning("  Could not open detail tab: %s", e)
 
-                    # Apply detail results to products
-                    for p_idx, product in enumerate(products):
-                        detail = detail_results[p_idx]
-                        if not detail:
-                            continue
-                        if detail["all_images"]:
-                            product["product_images"] = "|".join(detail["all_images"])
-                            if not product["product_image"] or product["product_image"].startswith("//"):
-                                product["product_image"] = detail["all_images"][0]
-                        if detail["variations"]:
-                            product["variations"] = json.dumps(detail["variations"])
-                        if detail["detail_title"] and len(detail["detail_title"]) > len(product.get("product_title", "")):
-                            product["product_title"] = detail["detail_title"]
+                    if detail_tab:
+                        detail_results = []
+                        for p_idx, product in enumerate(products):
+                            pid = product["id"]
+                            product_url = product["product_url"]
+                            if p_idx > 0:
+                                time.sleep(random.uniform(3.0, 5.0))
+                            log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
+                            handle_captcha(tab)
+                            detail_results.append(scrape_product_detail(detail_tab, product_url, pid, context=context))
+                            # Close any popup tabs AliExpress opened (keep main + detail)
+                            try:
+                                for p in context.pages:
+                                    if p != tab and p != detail_tab:
+                                        p.close()
+                            except Exception:
+                                pass
+
+                        # Close the detail tab when done
+                        try:
+                            detail_tab.close()
+                        except Exception:
+                            pass
+
+                        # Apply detail results to products
+                        for p_idx, product in enumerate(products):
+                            detail = detail_results[p_idx]
+                            if not detail:
+                                continue
+                            if detail["all_images"]:
+                                product["product_images"] = "|".join(detail["all_images"])
+                                if not product["product_image"] or product["product_image"].startswith("//"):
+                                    product["product_image"] = detail["all_images"][0]
+                            if detail["variations"]:
+                                product["variations"] = json.dumps(detail["variations"])
+                            if detail["detail_title"] and len(detail["detail_title"]) > len(product.get("product_title", "")):
+                                product["product_title"] = detail["detail_title"]
 
                 prev_total = csv_out.count
                 csv_out.add(products, url)
@@ -3042,23 +3062,10 @@ def main():
                     break
 
                 # --- Navigate to next page ---
-                # Close any popup tabs AliExpress may have opened
+                # Close any leftover popup tabs
                 close_extra_tabs(context, tab)
 
-                # After detail scraping, main tab is on a product page.
-                # Navigate directly back to the current search results page URL.
-                current_page_url = sort_by_orders(url)
-                if pg > 1:
-                    parsed = urlparse(current_page_url)
-                    qs = parse_qs(parsed.query, keep_blank_values=True)
-                    qs["page"] = [str(pg)]
-                    current_page_url = urlunparse(parsed._replace(query=urlencode(qs, doseq=True)))
-                try:
-                    tab.goto(current_page_url, wait_until="domcontentloaded", timeout=30000)
-                    wait_ready(tab, current_page_url)
-                except Exception:
-                    pass
-
+                # Main tab is STILL on search results — just go to next page
                 pg += 1
                 log.info("  Navigating to page %d...", pg)
                 # Always use direct URL navigation — more reliable than clicking
