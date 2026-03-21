@@ -1066,7 +1066,11 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             if not _cached_moduleanalysis_url:
                 try:
                     # Scroll to bottom to trigger description lazy load
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
+                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
+                    detail_tab.wait_for_timeout(500)
+                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.7)")
+                    detail_tab.wait_for_timeout(500)
+                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     detail_tab.wait_for_timeout(800)
                     detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     detail_tab.wait_for_timeout(1200)
@@ -1074,6 +1078,83 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     if _early_captured_module_url:
                         _cached_moduleanalysis_url = _early_captured_module_url[0]
                         log.info("      Desc: caught moduleanalysis URL during page load: %s", _cached_moduleanalysis_url[:120])
+                    else:
+                        # ONE-TIME diagnostic: dump page structure to find where description lives
+                        log.info("      Desc: NO moduleanalysis URL captured. Running page diagnostic...")
+                        try:
+                            diag = detail_tab.evaluate("""
+                            () => {
+                                const r = {};
+                                // 1. Check all iframes
+                                r.iframes = [];
+                                for (const f of document.querySelectorAll('iframe')) {
+                                    r.iframes.push({src: (f.src||'').substring(0,150), w: f.offsetWidth, h: f.offsetHeight});
+                                }
+                                // 2. Find all elements with "desc" in class/id
+                                r.descElements = [];
+                                const all = document.querySelectorAll('[class*="desc"], [class*="Desc"], [id*="desc"], [id*="Desc"], [class*="description"], [class*="Description"]');
+                                for (const el of [...all].slice(0, 15)) {
+                                    const text = (el.innerText||'').trim().substring(0, 80);
+                                    r.descElements.push({
+                                        tag: el.tagName, cls: (el.className||'').substring(0,100),
+                                        id: el.id||'', text: text, html: el.innerHTML.length,
+                                        vis: window.getComputedStyle(el).display !== 'none'
+                                    });
+                                }
+                                // 3. Look for View More / Show More buttons and what's near them
+                                r.viewMoreButtons = [];
+                                const btns = document.querySelectorAll('button, span, div, a');
+                                for (const b of btns) {
+                                    const t = (b.innerText||'').trim().toLowerCase();
+                                    if (t === 'view more' || t === 'show more' || t === 'see more') {
+                                        const parent = b.parentElement;
+                                        const pp = parent ? parent.parentElement : null;
+                                        r.viewMoreButtons.push({
+                                            tag: b.tagName, text: t,
+                                            parentCls: (parent ? parent.className||'' : '').substring(0,80),
+                                            gpCls: (pp ? pp.className||'' : '').substring(0,80),
+                                            nextSibHtml: b.nextElementSibling ? b.nextElementSibling.innerHTML.length : 0
+                                        });
+                                    }
+                                }
+                                // 4. Check for any script with moduleId/adminAccountId/sellerId
+                                r.scriptHits = [];
+                                const scripts = document.querySelectorAll('script');
+                                for (const s of scripts) {
+                                    const t = s.textContent||'';
+                                    if (t.length < 50) continue;
+                                    const hits = [];
+                                    if (/moduleId/i.test(t)) hits.push('moduleId');
+                                    if (/adminAccountId/i.test(t)) hits.push('adminAccountId');
+                                    if (/sellerId/i.test(t)) hits.push('sellerId');
+                                    if (/descriptionUrl/i.test(t)) hits.push('descriptionUrl');
+                                    if (/description.*?html/i.test(t)) hits.push('description+html');
+                                    if (hits.length > 0) r.scriptHits.push({len: t.length, hits: hits});
+                                }
+                                // 5. Check window globals for description data
+                                r.globals = {};
+                                const gNames = ['runParams', '__INIT_DATA__', 'runConfig', 'detailData', 'pageData'];
+                                for (const name of gNames) {
+                                    const g = window[name];
+                                    if (!g) continue;
+                                    try {
+                                        const s = JSON.stringify(g);
+                                        const hasDesc = /descri/i.test(s);
+                                        const hasModule = /moduleId/i.test(s);
+                                        r.globals[name] = {size: s.length, hasDesc: hasDesc, hasModule: hasModule};
+                                    } catch(e) { r.globals[name] = {error: 'circular'}; }
+                                }
+                                return r;
+                            }
+                            """)
+                            if diag:
+                                log.info("      DIAG iframes: %s", str(diag.get("iframes", []))[:300])
+                                log.info("      DIAG descElements: %s", str(diag.get("descElements", []))[:500])
+                                log.info("      DIAG viewMoreButtons: %s", str(diag.get("viewMoreButtons", []))[:500])
+                                log.info("      DIAG scriptHits: %s", str(diag.get("scriptHits", []))[:500])
+                                log.info("      DIAG globals: %s", str(diag.get("globals", {}))[:500])
+                        except Exception as e:
+                            log.info("      DIAG error: %s", str(e)[:120])
                 except Exception:
                     pass
             # Remove early listener
