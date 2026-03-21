@@ -1235,12 +1235,49 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 parsed2 = _json2.loads(desc_text)
                                 desc_text = parsed2.get("text", desc_text)
                                 s2_img = parsed2.get("img", "")
+                                # Python-side: if JS returned raw JSON text, parse it
+                                if desc_text and desc_text.lstrip().startswith("{"):
+                                    try:
+                                        j2 = _json2.loads(desc_text)
+                                        if isinstance(j2.get("data"), dict):
+                                            for v in j2["data"].values():
+                                                if isinstance(v, str) and len(v) > 50:
+                                                    import re as _re3
+                                                    clean = _re3.sub(r'<[^>]+>', ' ', v)
+                                                    desc_text = _re3.sub(r'\s+', ' ', clean).strip()[:3000]
+                                                    if not s2_img:
+                                                        img_m = _re3.search(r'src=["\']?(https?://[^"\'>\s]+(?:alicdn|ae01|ae04)[^"\'>\s]*\.(?:jpg|png|jpeg|webp))', v, _re3.IGNORECASE)
+                                                        if img_m:
+                                                            s2_img = img_m.group(1)
+                                                    break
+                                    except Exception:
+                                        pass
                                 if s2_img and s2_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
                                     result["all_images"].append(s2_img)
                                     log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
                             except (json.JSONDecodeError, TypeError, ValueError):
-                                pass  # desc_text is plain text, not JSON
-                            log.info("      Desc Strategy 2: got %d chars from %s", len(desc_text), api_url[:80])
+                                # desc_text might be raw moduleanalysis JSON
+                                if desc_text.lstrip().startswith("{"):
+                                    try:
+                                        import json as _json2b
+                                        import re as _re3b
+                                        j2 = _json2b.loads(desc_text)
+                                        if isinstance(j2.get("data"), dict):
+                                            for v in j2["data"].values():
+                                                if isinstance(v, str) and len(v) > 50:
+                                                    clean = _re3b.sub(r'<[^>]+>', ' ', v)
+                                                    desc_text = _re3b.sub(r'\s+', ' ', clean).strip()[:3000]
+                                                    img_m = _re3b.search(r'src=["\']?(https?://[^"\'>\s]+(?:alicdn|ae01|ae04)[^"\'>\s]*\.(?:jpg|png|jpeg|webp))', v, _re3b.IGNORECASE)
+                                                    if img_m and img_m.group(1) not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                                        result["all_images"].append(img_m.group(1))
+                                                    break
+                                    except Exception:
+                                        desc_text = ""
+                            # Reject JS code
+                            if desc_text and (desc_text.lstrip().startswith("/*") or "function(e){" in desc_text[:100]):
+                                desc_text = ""
+                            if desc_text:
+                                log.info("      Desc Strategy 2: got %d chars from %s", len(desc_text), api_url[:80])
                             # Cache moduleanalysis URL if it worked
                             if "moduleanalysis" in api_url:
                                 _cached_moduleanalysis_url = api_url
@@ -1432,9 +1469,9 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             log.info("      Desc captured: %s (status=%s, ct=%s)",
                                      cu["url"][:120], cu["status"], cu["ct"][:40])
                             # Cache moduleanalysis URL for reuse across products
-                            if "moduleanalysis" in cu["url"] and cu["status"] == 200:
+                            if "moduleanalysis" in cu["url"] and int(cu["status"]) == 200:
                                 _cached_moduleanalysis_url = cu["url"]
-                                log.info("      Desc: cached moduleanalysis URL for store")
+                                log.info("      Desc: CACHED moduleanalysis URL for store")
 
                     # Try to fetch each captured URL for description content
                     desc_img = ""
