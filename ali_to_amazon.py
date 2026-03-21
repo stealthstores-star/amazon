@@ -540,10 +540,17 @@ DETAIL_EXTRACT_JS = """
     const thumbSelectors = [
         '.images-view-item img',
         '[class*="slider--item"] img',
+        '[class*="slider--img"] img',
         '[class*="thumbnail"] img[src*="alicdn"]',
         '[class*="pic-gallery"] img',
         '[class*="PicGallery"] img',
         '.images-view-wrap img',
+        // Modern AliExpress uses CSS module hashed classes
+        '[class*="gallery"] img[src*="alicdn"]',
+        '[class*="Gallery"] img[src*="alicdn"]',
+        '[class*="imageGallery"] img',
+        '[class*="slider"] img[src*="alicdn"]',
+        '[class*="Slider"] img[src*="alicdn"]',
     ];
     for (const sel of thumbSelectors) {
         try {
@@ -553,11 +560,11 @@ DETAIL_EXTRACT_JS = """
                 addImage(src);
             }
         } catch(e) {}
-        if (result.images.length > 1) break;  // >1 because main image already counted
+        if (result.images.length >= 5) break;  // got enough
     }
 
-    // --- Strategy 2 (FALLBACK): imagePathList from JSON if DOM gave nothing ---
-    if (result.images.length === 0) {
+    // --- Strategy 2 (FALLBACK): imagePathList from JSON if DOM gave few/no images ---
+    if (result.images.length <= 2) {
         const html = document.documentElement.innerHTML;
         const imgListPatterns = [
             /"imagePathList"\\s*:\\s*\\[([^\\]]+)\\]/,
@@ -1353,7 +1360,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     if (firstImg) return;
                                     const src = img.src || img.getAttribute('data-src') || '';
                                     if (src && src.includes('alicdn') && !src.includes('icon')
-                                        && !src.includes('logo') && img.naturalWidth > 100) {
+                                        && !src.includes('logo') && !src.includes('thumbnail')) {
                                         firstImg = src.replace(/_\\d+x\\d+.*$/, '').replace(/\\.avif$/, '');
                                     }
                                 });
