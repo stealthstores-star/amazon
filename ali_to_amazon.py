@@ -1126,11 +1126,43 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             # Strategy 2: Try API endpoints (non-destructive, no page changes)
             if not desc_text and product_id:
                 log.info("      Desc: trying Strategy 2 (API endpoints)...")
-                api_urls = [
+                # Try to find moduleanalysis params from page source
+                try:
+                    module_url = detail_tab.evaluate("""
+                    () => {
+                        const html = document.documentElement.innerHTML;
+                        // Look for moduleIds and adminAccountId in page source
+                        const moduleMatch = html.match(/moduleIds[=:]["']?(\\d+)/);
+                        const adminMatch = html.match(/adminAccountId[=:]["']?(\\d+)/);
+                        if (moduleMatch && adminMatch) {
+                            return 'https://moduleanalysis.aliexpress.com/item/desc/module/analysis.json?moduleIds='
+                                + moduleMatch[1] + '&adminAccountId=' + adminMatch[1];
+                        }
+                        // Also check script tags for storeModule or descriptionModule
+                        const scripts = document.querySelectorAll('script');
+                        for (const s of scripts) {
+                            const t = s.textContent || '';
+                            const m1 = t.match(/"moduleId"\\s*:\\s*(\\d+)/);
+                            const m2 = t.match(/"adminAccountId"\\s*:\\s*"?(\\d+)/);
+                            if (m1 && m2) {
+                                return 'https://moduleanalysis.aliexpress.com/item/desc/module/analysis.json?moduleIds='
+                                    + m1[1] + '&adminAccountId=' + m2[1];
+                            }
+                        }
+                        return '';
+                    }
+                    """) or ""
+                except Exception:
+                    module_url = ""
+                api_urls = []
+                if module_url:
+                    api_urls.append(module_url)
+                    log.info("      Desc: found moduleanalysis URL: %s", module_url[:120])
+                api_urls.extend([
                     f"https://www.aliexpress.com/aer-api/module/item/description?productId={product_id}",
                     f"https://www.aliexpress.com/fn/item-description/index.html?productId={product_id}",
                     f"https://aeproductsourcesite.alicdn.com/product/description/pc/{product_id}.html",
-                ]
+                ])
                 for api_url in api_urls:
                     if desc_text:
                         break
@@ -1147,23 +1179,59 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 if (contentType.includes('json') || body.trim().startsWith('{')) {
                                     try {
                                         const j = JSON.parse(body);
-                                        html = j.data?.description || j.data?.content || j.description || j.content || j.result || '';
-                                        if (typeof html !== 'string') html = JSON.stringify(html);
+                                        // moduleanalysis format: {data: {moduleId: "html content"}}
+                                        if (j.data && typeof j.data === 'object' && !j.data.description) {
+                                            const values = Object.values(j.data);
+                                            for (const v of values) {
+                                                if (typeof v === 'string' && v.length > 50) {
+                                                    html = v;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (html === body) {
+                                            html = j.data?.description || j.data?.content || j.description || j.content || j.result || '';
+                                            if (typeof html !== 'string') html = JSON.stringify(html);
+                                        }
                                     } catch(e) { html = body; }
                                 }
                                 const tmp = document.createElement('div');
                                 tmp.innerHTML = html;
+                                // Get first description image before removing imgs
+                                let firstImg = '';
+                                tmp.querySelectorAll('img').forEach(img => {
+                                    if (firstImg) return;
+                                    const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                    if (src && src.includes('alicdn') && !src.includes('icon')
+                                        && !src.includes('logo') && !src.includes('thumbnail')) {
+                                        firstImg = src;
+                                    }
+                                });
+                                if (!firstImg) {
+                                    const imgMatch = html.match(/src=['"]?(https?:\/\/[^'"\\s>]+(?:alicdn|ae01|ae04)[^'"\\s>]*\\.(?:jpg|png|jpeg|webp))/i);
+                                    if (imgMatch) firstImg = imgMatch[1];
+                                }
                                 tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
                                 let text = tmp.innerText.trim();
                                 // Reject 404 pages and garbage
                                 if (text.includes('404') || text.includes("can't find") || text.includes('Sorry')) return '';
-                                if (/^Buy\s/i.test(text)) return '';
-                                if (text.length >= 50) return text.substring(0, 3000);
+                                if (/^Buy\\s/i.test(text)) return '';
+                                if (text.length >= 50) return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
                                 return '';
                             } catch(e) { return ''; }
                         }
                         """, api_url) or ""
                         if desc_text:
+                            try:
+                                import json as _json2
+                                parsed2 = _json2.loads(desc_text)
+                                desc_text = parsed2.get("text", desc_text)
+                                s2_img = parsed2.get("img", "")
+                                if s2_img and s2_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                    result["all_images"].append(s2_img)
+                                    log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                            except (json.JSONDecodeError, TypeError, ValueError):
+                                pass  # desc_text is plain text, not JSON
                             log.info("      Desc Strategy 2: got %d chars from %s", len(desc_text), api_url[:80])
                     except Exception:
                         pass
@@ -1365,7 +1433,32 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             async (url) => {
                                 try {
                                     const resp = await fetch(url);
-                                    const html = await resp.text();
+                                    let body = await resp.text();
+
+                                    // Handle JSON responses (moduleanalysis API returns {data: {id: "html..."}})
+                                    let html = body;
+                                    if (body.trim().startsWith('{')) {
+                                        try {
+                                            const j = JSON.parse(body);
+                                            // moduleanalysis format: {data: {moduleId: "html content"}}
+                                            if (j.data && typeof j.data === 'object') {
+                                                const values = Object.values(j.data);
+                                                for (const v of values) {
+                                                    if (typeof v === 'string' && v.length > 50) {
+                                                        html = v;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            // Other JSON formats
+                                            if (html === body) {
+                                                html = j.data?.description || j.data?.content ||
+                                                       j.description || j.content || j.result || body;
+                                                if (typeof html !== 'string') html = body;
+                                            }
+                                        } catch(e) {}
+                                    }
+
                                     const tmp = document.createElement('div');
                                     tmp.innerHTML = html;
                                     // Get first description image
@@ -1373,7 +1466,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     tmp.querySelectorAll('img').forEach(img => {
                                         if (firstImg) return;
                                         const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                        if (src && !src.includes('icon') && !src.includes('logo') && !src.includes('thumbnail')) {
+                                        if (src && src.includes('alicdn') && !src.includes('icon')
+                                            && !src.includes('logo') && !src.includes('thumbnail')) {
                                             firstImg = src;
                                         }
                                     });
@@ -1384,10 +1478,14 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     }
                                     tmp.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
                                     let text = tmp.innerText.trim();
+                                    // Reject JavaScript code
+                                    if (text.startsWith('/*') || text.startsWith('!function') || text.startsWith('(function'))
+                                        return '';
                                     for (const cut of ['additional regulatory', 'regulatory information']) {
                                         const idx = text.toLowerCase().indexOf(cut);
                                         if (idx > 0) { text = text.substring(0, idx).trim(); break; }
                                     }
+                                    if (text.length < 50 && !firstImg) return '';
                                     return JSON.stringify({text: text.substring(0, 3000), img: firstImg, htmlLen: html.length});
                                 } catch(e) { return ''; }
                             }
@@ -1406,10 +1504,14 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         except Exception:
                             pass
 
-                    # If no network capture worked, try ALL frames (including nested ones)
+                    # If no network capture worked, try ALL frames (skip wp.html and JS frames)
                     if not desc_text:
                         for frame in detail_tab.frames:
                             if frame == detail_tab.main_frame:
+                                continue
+                            frame_url = (frame.url or "").lower()
+                            # Skip known non-description frames
+                            if any(skip in frame_url for skip in ["wp.html", "store-proxy", "captcha", "recaptcha", "about:blank"]):
                                 continue
                             try:
                                 body_len = frame.evaluate("() => (document.body ? document.body.innerHTML.length : 0)")
@@ -1418,6 +1520,9 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     () => {
                                         if (!document.body) return '';
                                         let text = document.body.innerText.trim();
+                                        // Reject JavaScript code
+                                        if (text.startsWith('/*') || text.startsWith('!function') || text.startsWith('(function'))
+                                            return '';
                                         for (const cut of ['additional regulatory', 'regulatory information']) {
                                             const idx = text.toLowerCase().indexOf(cut);
                                             if (idx > 0) { text = text.substring(0, idx).trim(); break; }
@@ -1431,6 +1536,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                                 firstImg = src;
                                             }
                                         });
+                                        if (text.length < 50 && !firstImg) return '';
                                         return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
                                     }
                                     """) or ""
