@@ -1320,30 +1320,67 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Wait for description iframe to load (AliExpress puts desc in an iframe)
-                    detail_tab.wait_for_timeout(1500)
+                    # Wait for description to load, then extract
+                    detail_tab.wait_for_timeout(2000)
+
+                    # Diagnostic: dump ALL frames on page
                     desc_frame = None
+                    log.info("      Desc: total frames on page: %d", len(detail_tab.frames))
+                    for i, frame in enumerate(detail_tab.frames):
+                        try:
+                            fu = frame.url or ""
+                            if fu and fu != "about:blank" and frame != detail_tab.main_frame:
+                                body_len = frame.evaluate("() => (document.body ? document.body.innerHTML.length : 0)")
+                                log.info("      Frame[%d]: url=%s body=%d", i, fu[:120], body_len)
+                        except Exception as e:
+                            log.info("      Frame[%d]: url=%s error=%s", i, (frame.url or "")[:80], str(e)[:60])
+
+                    # Diagnostic: check what's inside the description container
+                    container_diag = detail_tab.evaluate("""
+                    () => {
+                        const sels = ['[class*="product-description"]', '[class*="detail-desc"]',
+                            '.product-description', '#product-description'];
+                        for (const sel of sels) {
+                            const el = document.querySelector(sel);
+                            if (el) {
+                                const iframe = el.querySelector('iframe');
+                                return JSON.stringify({
+                                    sel: sel,
+                                    html: el.innerHTML.substring(0, 500),
+                                    hasIframe: !!iframe,
+                                    iframeSrc: iframe ? (iframe.src || iframe.getAttribute('data-src') || '') : '',
+                                    childCount: el.children.length,
+                                    parentHeight: el.parentElement ? el.parentElement.offsetHeight : 0,
+                                    selfHeight: el.offsetHeight
+                                });
+                            }
+                        }
+                        return '{}';
+                    }
+                    """)
+                    log.info("      Desc container: %s", container_diag[:400])
+
+                    # Now poll for content in ALL frames (not just ones matching URL pattern)
                     for _poll in range(8):
-                        # Check all frames for description content
                         for frame in detail_tab.frames:
+                            if frame == detail_tab.main_frame:
+                                continue
                             try:
-                                frame_url = frame.url or ""
-                                # Description iframes typically have alicdn or desc in URL
-                                if any(k in frame_url for k in ["desc", "alicdn", "detail"]):
-                                    body_len = frame.evaluate("() => (document.body ? document.body.innerHTML.length : 0)")
-                                    img_count = frame.evaluate("() => document.querySelectorAll('img').length")
+                                body_len = frame.evaluate("() => (document.body ? document.body.innerHTML.length : 0)")
+                                if body_len > 100:
                                     text_len = frame.evaluate("() => (document.body ? document.body.innerText.trim().length : 0)")
-                                    log.info("      Desc poll %d: frame url=%s body=%d text=%d imgs=%d",
-                                             _poll + 1, frame_url[:80], body_len, text_len, img_count)
+                                    img_count = frame.evaluate("() => document.querySelectorAll('img').length")
+                                    log.info("      Desc poll %d: frame body=%d text=%d imgs=%d url=%s",
+                                             _poll + 1, body_len, text_len, img_count, (frame.url or "")[:80])
                                     if text_len > 50 or img_count > 0:
                                         desc_frame = frame
-                                        log.info("      Desc: found content in iframe!")
+                                        log.info("      Desc: found content in frame!")
                                         break
                             except Exception:
                                 continue
                         if desc_frame:
                             break
-                        # Also check main document as fallback
+                        # Also check main document
                         has_content = detail_tab.evaluate("""
                         () => {
                             const sels = ['.product-description', '.detailmodule_html',
@@ -1351,7 +1388,6 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             for (const sel of sels) {
                                 const els = document.querySelectorAll(sel);
                                 for (const el of els) {
-                                    // Skip if it just contains an iframe
                                     if (el.querySelector('iframe') && el.innerText.trim().length < 50) continue;
                                     if (el.innerText && el.innerText.trim().length > 50) return true;
                                     if (el.querySelectorAll('img').length > 0) return true;
@@ -1361,7 +1397,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         }
                         """)
                         if has_content:
-                            log.info("      Desc poll %d: content found in main document", _poll + 1)
+                            log.info("      Desc poll %d: content in main document", _poll + 1)
                             break
                         detail_tab.wait_for_timeout(1000)
 
