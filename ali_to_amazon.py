@@ -518,7 +518,25 @@ DETAIL_EXTRACT_JS = """
     // They represent exactly the images shown in the gallery — nothing more.
     // The main large image is always one of these thumbnails expanded.
 
-    // Find the thumbnail container — small images stacked vertically on the left
+    // Always grab the main/large image first
+    const mainSelectors = [
+        '.image-view-magnifier-wrap img',
+        '[class*="image-view"] img',
+        '.mag-img img',
+        '.product-image-panel img',
+    ];
+    for (const sel of mainSelectors) {
+        try {
+            const els = document.querySelectorAll(sel);
+            for (const el of els) {
+                const src = el.getAttribute('src') || el.getAttribute('data-src') || '';
+                addImage(src);
+            }
+        } catch(e) {}
+        if (result.images.length > 0) break;
+    }
+
+    // Then get all thumbnails (dedup will handle overlap with main image)
     const thumbSelectors = [
         '.images-view-item img',
         '[class*="slider--item"] img',
@@ -535,27 +553,7 @@ DETAIL_EXTRACT_JS = """
                 addImage(src);
             }
         } catch(e) {}
-        if (result.images.length > 0) break;
-    }
-
-    // Also get the main/large image (in case thumbnails didn't load)
-    if (result.images.length === 0) {
-        const mainSelectors = [
-            '.image-view-magnifier-wrap img',
-            '[class*="image-view"] img',
-            '.mag-img img',
-            '.product-image-panel img',
-        ];
-        for (const sel of mainSelectors) {
-            try {
-                const els = document.querySelectorAll(sel);
-                for (const el of els) {
-                    const src = el.getAttribute('src') || el.getAttribute('data-src') || '';
-                    addImage(src);
-                }
-            } catch(e) {}
-            if (result.images.length > 0) break;
-        }
+        if (result.images.length > 1) break;  // >1 because main image already counted
     }
 
     // --- Strategy 2 (FALLBACK): imagePathList from JSON if DOM gave nothing ---
@@ -683,24 +681,7 @@ DETAIL_EXTRACT_JS = """
                 : specText.substring(0, 2000);
         }
     }
-    // Strategy 3: JSON data in script tags
-    if (!result.description) {
-        try {
-            const scripts = document.querySelectorAll('script');
-            for (const s of scripts) {
-                const t = s.textContent || '';
-                const dm = t.match(/"description"\\s*:\\s*"([^"]{20,})"/);
-                if (dm) {
-                    result.description = dm[1].replace(/\\\\n/g, ' ').replace(/\\\\"/g, '"').substring(0, 2000);
-                    break;
-                }
-                const dm2 = t.match(/"subject"\\s*:\\s*"([^"]{20,})"/);
-                if (dm2) {
-                    result.description = dm2[1].substring(0, 2000);
-                    break;
-                }
-            }
-        } catch(e) {}
+    // Strategy 3: removed — JSON "description" field is just the SEO meta title, not useful
     }
 
     // Get price — try multiple strategies
@@ -1038,60 +1019,47 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 }
                 result.specs = specLines.join(' | ');
 
-                // ---- DESC: find descriptionUrl + dump all desc-related keys for debugging ----
-                let debugKeys = [];
-                for (const s of scripts) {
-                    const t = s.textContent || '';
-                    // Find descriptionUrl
-                    const m1 = t.match(/"descriptionUrl"\\s*:\\s*"(https?:[^"]+)"/);
-                    if (m1 && !result.descUrl) {
-                        result.descUrl = m1[1];
-                    }
-                    // Find textDescription
-                    const m2 = t.match(/"textDescription"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/);
-                    if (m2 && m2[1].length > 10) {
-                        debugKeys.push('textDescription(' + m2[1].length + ')=' + m2[1].substring(0, 80));
-                    }
-                    // Find ALL keys containing "desc" to see what's available
-                    const descMatches = t.matchAll(/"([^"]*[Dd]esc[^"]*)"\\s*:/g);
-                    for (const dm of descMatches) {
-                        if (!debugKeys.some(k => k.startsWith(dm[1]))) {
-                            // Get the value preview
-                            const valStart = t.indexOf(dm[0]) + dm[0].length;
-                            const valPreview = t.substring(valStart, valStart + 80).trim();
-                            debugKeys.push(dm[1] + '=' + valPreview);
-                        }
-                    }
-                }
-                result.debugDescKeys = debugKeys.slice(0, 15);
-
-                // Use textDescription if no URL found
-                if (!result.descUrl) {
-                    for (const s of scripts) {
-                        const t = s.textContent || '';
-                        const m = t.match(/"textDescription"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/);
-                        if (m && m[1].length > 50) {
-                            let text = m[1].replace(/\\\\n/g, ' ').replace(/\\\\"/g, '"').replace(/\\\\t/g, ' ');
-                            result.desc = text.substring(0, 3000);
-                            break;
-                        }
-                    }
-                }
                 return result;
             }
             """)
 
             specs_text = specs_and_desc.get("specs", "")
-            desc_text = specs_and_desc.get("desc", "")
-            desc_url = specs_and_desc.get("descUrl", "")
-            debug_keys = specs_and_desc.get("debugDescKeys", [])
-            if debug_keys:
-                log.info("      DEBUG desc keys: %s", str(debug_keys)[:500])
-            if desc_url:
-                log.info("      DEBUG descUrl: %s", desc_url[:200])
+            desc_text = ""
 
-            # Fetch actual description from descriptionUrl if available
-            if desc_url and not desc_text:
+            # --- DESCRIPTION EXTRACTION ---
+            # Strategy 1: Find descriptionUrl in page source and fetch it
+            # Strategy 2: Scroll to description section and extract from DOM
+            # Strategy 3: Use AliExpress API to get description HTML
+
+            # Strategy 1: Search ALL page source for any desc URL (broader search)
+            try:
+                desc_url = detail_tab.evaluate("""
+                () => {
+                    const html = document.documentElement.innerHTML;
+                    // Try various patterns for the description URL
+                    const patterns = [
+                        /"descriptionUrl"\\s*:\\s*"(https?:[^"]+)"/,
+                        /"descriptionUrl"\\s*:\\s*"(\\/\\/[^"]+)"/,
+                        /descriptionUrl['":\\s]+(https?:\\/\\/[^"'\\s,}]+)/,
+                        /(https?:\\/\\/[a-z0-9-]+\\.alicdn\\.com\\/[^"'\\s]*desc[^"'\\s]*\\.htm[l]?)/i,
+                        /(\\/\\/[a-z0-9-]+\\.alicdn\\.com\\/[^"'\\s]*desc[^"'\\s]*\\.htm[l]?)/i,
+                    ];
+                    for (const p of patterns) {
+                        const m = html.match(p);
+                        if (m) {
+                            let url = m[1];
+                            if (url.startsWith('//')) url = 'https:' + url;
+                            return url;
+                        }
+                    }
+                    return '';
+                }
+                """) or ""
+            except Exception:
+                desc_url = ""
+
+            if desc_url:
+                log.info("      Desc URL found: %s", desc_url[:120])
                 try:
                     desc_text = detail_tab.evaluate("""
                     async (url) => {
@@ -1100,10 +1068,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             const html = await resp.text();
                             const tmp = document.createElement('div');
                             tmp.innerHTML = html;
-                            // Remove images, scripts, styles
-                            tmp.querySelectorAll('img, script, style').forEach(e => e.remove());
+                            tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
                             let text = tmp.innerText.trim();
-                            // Stop at regulatory info
                             const lower = text.toLowerCase();
                             for (const cut of ['additional regulatory', 'regulatory information']) {
                                 const idx = lower.indexOf(cut);
@@ -1112,7 +1078,112 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             return text.substring(0, 3000);
                         } catch(e) { return ''; }
                     }
-                    """, desc_url)
+                    """, desc_url) or ""
+                except Exception:
+                    pass
+
+            # Strategy 2: Scroll down and extract description from DOM
+            if not desc_text:
+                try:
+                    # Scroll to bottom to trigger lazy-loading of description
+                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    detail_tab.wait_for_timeout(2000)
+
+                    # Try clicking Description tab if it exists
+                    try:
+                        detail_tab.evaluate("""
+                        () => {
+                            const tabs = document.querySelectorAll('[class*="tab"], [role="tab"], [class*="Tab"]');
+                            for (const tab of tabs) {
+                                const text = (tab.innerText || '').trim().toLowerCase();
+                                if (text.includes('description')) {
+                                    tab.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        """)
+                        detail_tab.wait_for_timeout(1500)
+                    except Exception:
+                        pass
+
+                    desc_text = detail_tab.evaluate("""
+                    () => {
+                        const descSelectors = [
+                            '#product-description',
+                            '[class*="product-description"]',
+                            '[class*="ProductDescription"]',
+                            '[class*="detail-desc"]',
+                            '[class*="DetailDesc"]',
+                            '[class*="description--wrap"]',
+                            '[class*="description-content"]',
+                            '[class*="desc-content"]',
+                            '.product-detail-tab-content',
+                            '[class*="product-detail"] [class*="content"]',
+                            // Sometimes it's in a module container
+                            '[class*="detail-extend"]',
+                            '[data-pl="product-description"]',
+                        ];
+
+                        for (const sel of descSelectors) {
+                            try {
+                                const el = document.querySelector(sel);
+                                if (el) {
+                                    const clone = el.cloneNode(true);
+                                    clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
+                                    let text = clone.innerText.trim();
+                                    if (text.length > 20) {
+                                        const lower = text.toLowerCase();
+                                        for (const cut of ['additional regulatory', 'regulatory information',
+                                                           'shipping info', 'return policy']) {
+                                            const idx = lower.indexOf(cut);
+                                            if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                        }
+                                        return text.substring(0, 3000);
+                                    }
+                                }
+                            } catch(e) {}
+                        }
+
+                        // Try iframe-based description
+                        const iframes = document.querySelectorAll('iframe[src*="desc"], iframe[src*="alicdn"]');
+                        for (const iframe of iframes) {
+                            try {
+                                const doc = iframe.contentDocument || iframe.contentWindow.document;
+                                if (doc && doc.body) {
+                                    const clone = doc.body.cloneNode(true);
+                                    clone.querySelectorAll('img, script, style').forEach(e => e.remove());
+                                    let text = clone.innerText.trim();
+                                    if (text.length > 20) return text.substring(0, 3000);
+                                }
+                            } catch(e) {}
+                        }
+
+                        return '';
+                    }
+                    """) or ""
+                except Exception as e:
+                    log.debug("      Description DOM extraction error: %s", str(e)[:80])
+
+            # Strategy 3: Try AliExpress product description API
+            if not desc_text and product_id:
+                try:
+                    api_url = f"https://www.aliexpress.com/fn/item-description/index.html?productId={product_id}"
+                    desc_text = detail_tab.evaluate("""
+                    async (url) => {
+                        try {
+                            const resp = await fetch(url, {credentials: 'include'});
+                            const html = await resp.text();
+                            const tmp = document.createElement('div');
+                            tmp.innerHTML = html;
+                            tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                            let text = tmp.innerText.trim();
+                            if (text.length > 20) return text.substring(0, 3000);
+                            return '';
+                        } catch(e) { return ''; }
+                    }
+                    """, api_url) or ""
                 except Exception:
                     pass
 
@@ -1256,17 +1327,13 @@ def scrape_details_parallel(context, products, main_tab):
                     result["detail_price"] = data["price"]
                 if data.get("shipping"):
                     result["detail_shipping"] = data["shipping"]
-                if data.get("description"):
-                    result["detail_description"] = data["description"]
-                # If only 1 image or no description, scroll and retry
-                if len(result["all_images"]) <= 1 or not result["detail_description"]:
+                # If only 1 image, scroll and retry for more
+                if len(result["all_images"]) <= 1:
                     tabs[i].evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
                     tabs[i].wait_for_timeout(800)
                     data2 = tabs[i].evaluate(DETAIL_EXTRACT_JS)
                     if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
                         result["all_images"] = data2["images"][:MAX_IMAGES]
-                    if data2.get("description") and len(data2.get("description", "")) > len(result["detail_description"]):
-                        result["detail_description"] = data2["description"]
             except Exception as e:
                 log.debug("  Detail scrape failed for %s: %s", pid, str(e)[:80])
             results[idx] = result
