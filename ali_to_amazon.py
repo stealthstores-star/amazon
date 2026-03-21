@@ -3372,35 +3372,9 @@ def post_process(csv_path):
     dupes = original_count - len(unique_rows)
     log.info("  %d products -> %d unique (%d duplicates removed)", original_count, len(unique_rows), dupes)
 
-    # --- Step 2: Filter for resin models ---
-    log.info("Step 2: Filtering for resin models / model kits...")
-    resin_rows = []
-    rejected = []
-    for row in unique_rows:
-        title = row.get("product_title", "")
-        if is_resin_model(title):
-            resin_rows.append(row)
-        else:
-            rejected.append(title[:60])
-
-    log.info("  %d resin models found out of %d unique products", len(resin_rows), len(unique_rows))
-    log.info("  %d non-resin products filtered out", len(rejected))
-
-    if not resin_rows:
-        log.warning("  No resin models found! Check your search URLs.")
-        log.info("  Sample rejected titles:")
-        for t in rejected[:10]:
-            log.info("    - %s", t)
-        return
-
-    # Save filtered CSV
-    base = os.path.splitext(csv_path)[0]
-    filtered_path = f"{base}_resin_models.csv"
-    with open(filtered_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(resin_rows)
-    log.info("  Saved filtered CSV: %s", filtered_path)
+    # --- Step 2: Use all products (no filtering) ---
+    log.info("Step 2: %d products to process", len(unique_rows))
+    product_rows = unique_rows
 
     # --- Step 3: Rehost ALL images (parallel) ---
     log.info("Step 3: Rehosting images (Amazon-compatible JPEG hosting)...")
@@ -3409,7 +3383,7 @@ def post_process(csv_path):
 
     # Collect all image URLs with back-references to where results go
     upload_tasks = []  # list of (row_index, slot_type, slot_key, img_url)
-    for row_idx, row in enumerate(resin_rows):
+    for row_idx, row in enumerate(product_rows):
         all_images_str = row.get("product_images", "")
         all_images = [img.strip() for img in all_images_str.split("|") if img.strip()] if all_images_str else []
         if not all_images:
@@ -3432,7 +3406,7 @@ def post_process(csv_path):
                 pass
 
     log.info("  %d images to rehost across %d products (parallel, 3 workers)...",
-             len(upload_tasks), len(resin_rows))
+             len(upload_tasks), len(product_rows))
 
     # Run uploads in parallel
     results = {}  # task_index -> new_url
@@ -3451,7 +3425,7 @@ def post_process(csv_path):
     # Apply results back to rows
     for task_idx, (row_idx, slot_type, slot_key, img_url) in enumerate(upload_tasks):
         new_url = results.get(task_idx)
-        row = resin_rows[row_idx]
+        row = product_rows[row_idx]
         if new_url and new_url != "SKIPPED":
             if slot_type == "main":
                 row.setdefault("rehosted_images", [])
@@ -3471,7 +3445,7 @@ def post_process(csv_path):
             log.warning("    FAILED to rehost: %s", img_url[:80])
 
     # Finalize ordered main images
-    for row in resin_rows:
+    for row in product_rows:
         ordered = row.pop("_rehost_ordered", [])
         ordered.sort(key=lambda x: x[0])
         row["rehosted_images"] = [url for _, url in ordered]
@@ -3488,10 +3462,10 @@ def post_process(csv_path):
         return
 
     log.info("  Using template: %s", template_path)
-    log.info("  Filling %d products into Amazon template...", len(resin_rows))
+    log.info("  Filling %d products into Amazon template...", len(product_rows))
 
     try:
-        output_file, count = fill_amazon_template(template_path, resin_rows)
+        output_file, count = fill_amazon_template(template_path, product_rows)
         log.info("=" * 60)
         log.info("  DONE! %d rows -> %s", count, output_file)
         log.info("=" * 60)
