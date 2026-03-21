@@ -1320,106 +1320,139 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Wait for description content to load, with diagnostics
-                    for _poll in range(5):
-                        diag = detail_tab.evaluate("""
+                    # Wait for description iframe to load (AliExpress puts desc in an iframe)
+                    detail_tab.wait_for_timeout(1500)
+                    desc_frame = None
+                    for _poll in range(8):
+                        # Check all frames for description content
+                        for frame in detail_tab.frames:
+                            try:
+                                frame_url = frame.url or ""
+                                # Description iframes typically have alicdn or desc in URL
+                                if any(k in frame_url for k in ["desc", "alicdn", "detail"]):
+                                    body_len = frame.evaluate("() => (document.body ? document.body.innerHTML.length : 0)")
+                                    img_count = frame.evaluate("() => document.querySelectorAll('img').length")
+                                    text_len = frame.evaluate("() => (document.body ? document.body.innerText.trim().length : 0)")
+                                    log.info("      Desc poll %d: frame url=%s body=%d text=%d imgs=%d",
+                                             _poll + 1, frame_url[:80], body_len, text_len, img_count)
+                                    if text_len > 50 or img_count > 0:
+                                        desc_frame = frame
+                                        log.info("      Desc: found content in iframe!")
+                                        break
+                            except Exception:
+                                continue
+                        if desc_frame:
+                            break
+                        # Also check main document as fallback
+                        has_content = detail_tab.evaluate("""
                         () => {
-                            const results = {};
                             const sels = ['.product-description', '.detailmodule_html',
-                                '.detail-desc-decorate-richtext',
                                 '[class*="product-description"]', '[class*="detail-desc"]'];
                             for (const sel of sels) {
                                 const els = document.querySelectorAll(sel);
-                                const info = [];
                                 for (const el of els) {
-                                    const text = (el.innerText || '').trim();
-                                    const imgs = el.querySelectorAll('img').length;
-                                    info.push({text: text.length, imgs: imgs, html: el.innerHTML.length});
+                                    // Skip if it just contains an iframe
+                                    if (el.querySelector('iframe') && el.innerText.trim().length < 50) continue;
+                                    if (el.innerText && el.innerText.trim().length > 50) return true;
+                                    if (el.querySelectorAll('img').length > 0) return true;
                                 }
-                                if (info.length > 0) results[sel] = info;
                             }
-                            return JSON.stringify(results);
+                            return false;
                         }
                         """)
-                        log.info("      Desc poll %d: %s", _poll + 1, diag[:300])
+                        if has_content:
+                            log.info("      Desc poll %d: content found in main document", _poll + 1)
+                            break
+                        detail_tab.wait_for_timeout(1000)
+
+                    # Extract from iframe if found
+                    desc_result = ""
+                    if desc_frame:
                         try:
-                            import json as _json2
-                            parsed_diag = _json2.loads(diag)
-                            for sel, infos in parsed_diag.items():
-                                for info in infos:
-                                    if info.get("text", 0) > 50 or info.get("imgs", 0) > 0:
-                                        log.info("      Desc: content found in '%s' (text=%d, imgs=%d)",
-                                                 sel, info["text"], info["imgs"])
-                                        break
-                                else:
-                                    continue
-                                break
-                            else:
-                                detail_tab.wait_for_timeout(1000)
-                                continue
-                            break  # Content found, stop polling
-                        except Exception:
-                            detail_tab.wait_for_timeout(1000)
-
-                    # Extract text and images from the now-expanded description
-                    desc_result = detail_tab.evaluate("""
-                    () => {
-                        const descSelectors = [
-                            '.product-description',
-                            '.detailmodule_html',
-                            '.detail-desc-decorate-richtext',
-                            '#product-description',
-                            '[class*="product-description"]',
-                            '[class*="ProductDescription"]',
-                            '[class*="detail-desc"]',
-                            '[class*="DetailDesc"]',
-                            '[class*="description-content"]',
-                            '[class*="desc-content"]',
-                            '[class*="detail-extend"]',
-                            '[data-pl="product-description"]',
-                        ];
-
-                        const found = [];
-                        for (const sel of descSelectors) {
-                            try {
-                                // Use querySelectorAll — first match may be an empty wrapper
-                                const allEls = document.querySelectorAll(sel);
-                                for (const el of allEls) {
-                                if (!el) continue;
-                                const clone = el.cloneNode(true);
-                                clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
-                                let text = clone.innerText.trim();
-                                const stripped = text.toLowerCase().replace(/[^a-z]/g, '');
-                                if (['description','descriptionreportviewmore','descriptionviewmore',
-                                     'viewmore','descriptionreport'].includes(stripped)) continue;
+                            desc_result = desc_frame.evaluate("""
+                            () => {
+                                if (!document.body) return '';
+                                let text = document.body.innerText.trim();
                                 for (const cut of ['additional regulatory', 'regulatory information',
                                                    'shipping info', 'return policy']) {
                                     const idx = text.toLowerCase().indexOf(cut);
                                     if (idx > 0) { text = text.substring(0, idx).trim(); break; }
                                 }
-                                // Get 1st description image
                                 let firstImg = '';
-                                el.querySelectorAll('img').forEach(img => {
+                                document.querySelectorAll('img').forEach(img => {
                                     if (firstImg) return;
                                     const src = img.src || img.getAttribute('data-src') || '';
                                     if (src && src.includes('alicdn') && !src.includes('icon')
                                         && !src.includes('logo') && !src.includes('thumbnail')) {
-                                        firstImg = src.replace(/_\\d+x\\d+.*$/, '').replace(/\\.avif$/, '');
+                                        firstImg = src;
                                     }
                                 });
-                                if (text.length >= 50 || firstImg) {
-                                    found.push({sel, textLen: text.length,
-                                        text: text.length >= 50 ? text.substring(0, 3000) : '',
-                                        img: firstImg});
-                                }
-                                } // end for (const el of allEls)
-                            } catch(e) {}
+                                return JSON.stringify({sel: 'iframe', textLen: text.length,
+                                    text: text.length >= 50 ? text.substring(0, 3000) : '',
+                                    img: firstImg});
+                            }
+                            """) or ""
+                        except Exception as e:
+                            log.info("      Desc iframe extraction error: %s", str(e)[:120])
+
+                    # Fallback: extract from main document if iframe didn't work
+                    if not desc_result:
+                        desc_result = detail_tab.evaluate("""
+                        () => {
+                            const descSelectors = [
+                                '.product-description',
+                                '.detailmodule_html',
+                                '.detail-desc-decorate-richtext',
+                                '#product-description',
+                                '[class*="product-description"]',
+                                '[class*="ProductDescription"]',
+                                '[class*="detail-desc"]',
+                                '[class*="DetailDesc"]',
+                                '[class*="description-content"]',
+                                '[class*="desc-content"]',
+                                '[class*="detail-extend"]',
+                                '[data-pl="product-description"]',
+                            ];
+
+                            const found = [];
+                            for (const sel of descSelectors) {
+                                try {
+                                    const allEls = document.querySelectorAll(sel);
+                                    for (const el of allEls) {
+                                    if (!el) continue;
+                                    const clone = el.cloneNode(true);
+                                    clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
+                                    let text = clone.innerText.trim();
+                                    const stripped = text.toLowerCase().replace(/[^a-z]/g, '');
+                                    if (['description','descriptionreportviewmore','descriptionviewmore',
+                                         'viewmore','descriptionreport'].includes(stripped)) continue;
+                                    for (const cut of ['additional regulatory', 'regulatory information',
+                                                       'shipping info', 'return policy']) {
+                                        const idx = text.toLowerCase().indexOf(cut);
+                                        if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                    }
+                                    let firstImg = '';
+                                    el.querySelectorAll('img').forEach(img => {
+                                        if (firstImg) return;
+                                        const src = img.src || img.getAttribute('data-src') || '';
+                                        if (src && src.includes('alicdn') && !src.includes('icon')
+                                            && !src.includes('logo') && !src.includes('thumbnail')) {
+                                            firstImg = src.replace(/_\\d+x\\d+.*$/, '').replace(/\\.avif$/, '');
+                                        }
+                                    });
+                                    if (text.length >= 50 || firstImg) {
+                                        found.push({sel, textLen: text.length,
+                                            text: text.length >= 50 ? text.substring(0, 3000) : '',
+                                            img: firstImg});
+                                    }
+                                    } // end for (const el of allEls)
+                                } catch(e) {}
+                            }
+                            if (found.length === 0) return '';
+                            found.sort((a, b) => (b.textLen || 0) - (a.textLen || 0));
+                            return JSON.stringify(found[0]);
                         }
-                        if (found.length === 0) return '';
-                        found.sort((a, b) => (b.textLen || 0) - (a.textLen || 0));
-                        return JSON.stringify(found[0]);
-                    }
-                    """) or ""
+                        """) or ""
 
                     if desc_result:
                         try:
@@ -1459,34 +1492,61 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             # Always try to grab 1 description image (regardless of which strategy got text)
             # This runs after View More may have been clicked, so desc images should be loaded
             if len(result["all_images"]) < MAX_IMAGES:
+                desc_img = ""
+                # First try iframe (AliExpress loads desc images inside iframes)
                 try:
-                    desc_img = detail_tab.evaluate("""
-                    () => {
-                        // Look for images inside the description section
-                        const sels = ['.product-description', '.detailmodule_html',
-                            '.detail-desc-decorate-richtext', '[class*="product-description"]',
-                            '[class*="detail-desc"]'];
-                        for (const sel of sels) {
-                            const els = document.querySelectorAll(sel);
-                            for (const el of els) {
-                                const imgs = el.querySelectorAll('img');
-                                for (const img of imgs) {
-                                    const src = img.src || img.getAttribute('data-src') || '';
-                                    if (src && src.includes('alicdn') && !src.includes('icon')
-                                        && !src.includes('logo') && !src.includes('thumbnail')) {
-                                        return src.replace(/_\\d+x\\d+.*$/, '').replace(/\\.avif$/, '');
+                    for frame in detail_tab.frames:
+                        try:
+                            frame_url = frame.url or ""
+                            if any(k in frame_url for k in ["desc", "alicdn", "detail"]):
+                                desc_img = frame.evaluate("""
+                                () => {
+                                    const imgs = document.querySelectorAll('img');
+                                    for (const img of imgs) {
+                                        const src = img.src || img.getAttribute('data-src') || '';
+                                        if (src && src.includes('alicdn') && !src.includes('icon')
+                                            && !src.includes('logo') && !src.includes('thumbnail')) {
+                                            return src;
+                                        }
+                                    }
+                                    return '';
+                                }
+                                """) or ""
+                                if desc_img:
+                                    break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                # Fallback: check main document
+                if not desc_img:
+                    try:
+                        desc_img = detail_tab.evaluate("""
+                        () => {
+                            const sels = ['.product-description', '.detailmodule_html',
+                                '.detail-desc-decorate-richtext', '[class*="product-description"]',
+                                '[class*="detail-desc"]'];
+                            for (const sel of sels) {
+                                const els = document.querySelectorAll(sel);
+                                for (const el of els) {
+                                    const imgs = el.querySelectorAll('img');
+                                    for (const img of imgs) {
+                                        const src = img.src || img.getAttribute('data-src') || '';
+                                        if (src && src.includes('alicdn') && !src.includes('icon')
+                                            && !src.includes('logo') && !src.includes('thumbnail')) {
+                                            return src.replace(/_\\d+x\\d+.*$/, '').replace(/\\.avif$/, '');
+                                        }
                                     }
                                 }
                             }
+                            return '';
                         }
-                        return '';
-                    }
-                    """) or ""
-                    if desc_img and desc_img not in result["all_images"]:
-                        result["all_images"].append(desc_img)
-                        log.info("      Desc: added 1 description image (total: %d)", len(result["all_images"]))
-                except Exception:
-                    pass
+                        """) or ""
+                    except Exception:
+                        pass
+                if desc_img and desc_img not in result["all_images"]:
+                    result["all_images"].append(desc_img)
+                    log.info("      Desc: added 1 description image (total: %d)", len(result["all_images"]))
 
             if specs_text:
                 log.info("      Specs: %s", specs_text[:120])
