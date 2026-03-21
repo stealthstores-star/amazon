@@ -872,10 +872,13 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         def _early_on_response(response):
             try:
                 url = response.url
-                if "moduleanalysis" in url and "analysis.json" in url and response.status == 200:
-                    _early_captured_module_url.append(url)
-                elif "item/desc" in url.lower() and response.status == 200:
-                    _early_captured_module_url.append(url)
+                if response.status == 200:
+                    if "moduleanalysis" in url and "analysis.json" in url:
+                        _early_captured_module_url.append(url)
+                    elif "aeproductsourcesite" in url and "desc.htm" in url:
+                        _early_captured_module_url.append(url)
+                    elif "item/desc" in url.lower() and "analysis.json" in url:
+                        _early_captured_module_url.append(url)
             except Exception:
                 pass
         detail_tab.on("response", _early_on_response)
@@ -1076,85 +1079,14 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     detail_tab.wait_for_timeout(1200)
                     # Check if the early listener caught a moduleanalysis URL
                     if _early_captured_module_url:
-                        _cached_moduleanalysis_url = _early_captured_module_url[0]
-                        log.info("      Desc: caught moduleanalysis URL during page load: %s", _cached_moduleanalysis_url[:120])
+                        _url = _early_captured_module_url[0]
+                        if "desc.htm" in _url:
+                            import re as _re_early
+                            _url = _re_early.sub(r'productId=\d+', 'productId={pid}', _url)
+                        _cached_moduleanalysis_url = _url
+                        log.info("      Desc: caught desc URL during page load: %s", _cached_moduleanalysis_url[:120])
                     else:
-                        # ONE-TIME diagnostic: dump page structure to find where description lives
-                        log.info("      Desc: NO moduleanalysis URL captured. Running page diagnostic...")
-                        try:
-                            diag = detail_tab.evaluate("""
-                            () => {
-                                const r = {};
-                                // 1. Check all iframes
-                                r.iframes = [];
-                                for (const f of document.querySelectorAll('iframe')) {
-                                    r.iframes.push({src: (f.src||'').substring(0,150), w: f.offsetWidth, h: f.offsetHeight});
-                                }
-                                // 2. Find all elements with "desc" in class/id
-                                r.descElements = [];
-                                const all = document.querySelectorAll('[class*="desc"], [class*="Desc"], [id*="desc"], [id*="Desc"], [class*="description"], [class*="Description"]');
-                                for (const el of [...all].slice(0, 15)) {
-                                    const text = (el.innerText||'').trim().substring(0, 80);
-                                    r.descElements.push({
-                                        tag: el.tagName, cls: (el.className||'').substring(0,100),
-                                        id: el.id||'', text: text, html: el.innerHTML.length,
-                                        vis: window.getComputedStyle(el).display !== 'none'
-                                    });
-                                }
-                                // 3. Look for View More / Show More buttons and what's near them
-                                r.viewMoreButtons = [];
-                                const btns = document.querySelectorAll('button, span, div, a');
-                                for (const b of btns) {
-                                    const t = (b.innerText||'').trim().toLowerCase();
-                                    if (t === 'view more' || t === 'show more' || t === 'see more') {
-                                        const parent = b.parentElement;
-                                        const pp = parent ? parent.parentElement : null;
-                                        r.viewMoreButtons.push({
-                                            tag: b.tagName, text: t,
-                                            parentCls: (parent ? parent.className||'' : '').substring(0,80),
-                                            gpCls: (pp ? pp.className||'' : '').substring(0,80),
-                                            nextSibHtml: b.nextElementSibling ? b.nextElementSibling.innerHTML.length : 0
-                                        });
-                                    }
-                                }
-                                // 4. Check for any script with moduleId/adminAccountId/sellerId
-                                r.scriptHits = [];
-                                const scripts = document.querySelectorAll('script');
-                                for (const s of scripts) {
-                                    const t = s.textContent||'';
-                                    if (t.length < 50) continue;
-                                    const hits = [];
-                                    if (/moduleId/i.test(t)) hits.push('moduleId');
-                                    if (/adminAccountId/i.test(t)) hits.push('adminAccountId');
-                                    if (/sellerId/i.test(t)) hits.push('sellerId');
-                                    if (/descriptionUrl/i.test(t)) hits.push('descriptionUrl');
-                                    if (/description.*?html/i.test(t)) hits.push('description+html');
-                                    if (hits.length > 0) r.scriptHits.push({len: t.length, hits: hits});
-                                }
-                                // 5. Check window globals for description data
-                                r.globals = {};
-                                const gNames = ['runParams', '__INIT_DATA__', 'runConfig', 'detailData', 'pageData'];
-                                for (const name of gNames) {
-                                    const g = window[name];
-                                    if (!g) continue;
-                                    try {
-                                        const s = JSON.stringify(g);
-                                        const hasDesc = /descri/i.test(s);
-                                        const hasModule = /moduleId/i.test(s);
-                                        r.globals[name] = {size: s.length, hasDesc: hasDesc, hasModule: hasModule};
-                                    } catch(e) { r.globals[name] = {error: 'circular'}; }
-                                }
-                                return r;
-                            }
-                            """)
-                            if diag:
-                                log.info("      DIAG iframes: %s", str(diag.get("iframes", []))[:300])
-                                log.info("      DIAG descElements: %s", str(diag.get("descElements", []))[:500])
-                                log.info("      DIAG viewMoreButtons: %s", str(diag.get("viewMoreButtons", []))[:500])
-                                log.info("      DIAG scriptHits: %s", str(diag.get("scriptHits", []))[:500])
-                                log.info("      DIAG globals: %s", str(diag.get("globals", {}))[:500])
-                        except Exception as e:
-                            log.info("      DIAG error: %s", str(e)[:120])
+                        log.info("      Desc: no desc URL captured during page load scroll")
                 except Exception:
                     pass
             # Remove early listener
@@ -1464,8 +1396,12 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 api_urls = []
                 # Try cached moduleanalysis URL first (same for all products in a store)
                 if _cached_moduleanalysis_url:
-                    api_urls.append(_cached_moduleanalysis_url)
-                    log.info("      Desc: using cached moduleanalysis URL")
+                    # Substitute product ID if the cached URL has a placeholder
+                    cached_url = _cached_moduleanalysis_url
+                    if "{pid}" in cached_url:
+                        cached_url = cached_url.replace("{pid}", str(product_id))
+                    api_urls.append(cached_url)
+                    log.info("      Desc: using cached desc URL")
                 if module_url and module_url not in api_urls:
                     api_urls.append(module_url)
                     log.info("      Desc: found moduleanalysis URL: %s", module_url[:120])
@@ -1869,10 +1805,19 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         for cu in captured_urls[:8]:
                             log.info("      Desc captured: %s (status=%s, ct=%s, desc=%s)",
                                      cu["url"][:120], cu["status"], cu["ct"][:40], cu.get("is_desc"))
-                            # Cache moduleanalysis URL for reuse across products
-                            if "moduleanalysis" in cu["url"] and "analysis.json" in cu["url"] and int(cu["status"]) == 200:
-                                _cached_moduleanalysis_url = cu["url"]
-                                log.info("      Desc: CACHED moduleanalysis URL for store")
+                            cu_url = cu["url"]
+                            cu_status = int(cu["status"])
+                            # Cache description URL for reuse across products
+                            if cu_status == 200:
+                                if "moduleanalysis" in cu_url and "analysis.json" in cu_url:
+                                    _cached_moduleanalysis_url = cu_url
+                                    log.info("      Desc: CACHED moduleanalysis URL for store")
+                                elif "aeproductsourcesite" in cu_url and "desc.htm" in cu_url:
+                                    # Cache the desc.htm URL pattern — swap productId for other products
+                                    import re as _re_cache
+                                    base = _re_cache.sub(r'productId=\d+', 'productId={pid}', cu_url)
+                                    _cached_moduleanalysis_url = base
+                                    log.info("      Desc: CACHED desc.htm URL pattern for store")
 
                     # Try to fetch each captured URL for description content
                     # Only try desc-related URLs, skip recommendation/analytics garbage
