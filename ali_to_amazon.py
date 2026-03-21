@@ -2166,9 +2166,9 @@ def _extract_specs_from_ali_desc(ali_desc):
                 matched_spec = True
                 break
 
-        # Also catch "Key: Value" format directly
+        # Also catch "Key: Value" format directly (colon only, not hyphen)
         if not matched_spec:
-            kv = re.match(r'^([A-Za-z][A-Za-z\s]{2,20})\s*[:\-]\s*(.{2,100})$', line)
+            kv = re.match(r'^([A-Za-z][A-Za-z\s]{2,20})\s*:\s*(.{2,100})$', line)
             if kv:
                 key = kv.group(1).strip().title()
                 val = kv.group(2).strip().rstrip('.')
@@ -2189,63 +2189,47 @@ def _extract_specs_from_ali_desc(ali_desc):
 
 
 def make_description(title, ali_description=None):
-    """Generate a clean, easy-to-read Amazon product description.
+    """Generate a clean, accurate Amazon product description.
 
-    Uses the scraped AliExpress description to extract real product specs
-    and features, then rewrites them in a professional format for Amazon.
+    Prioritises real information from the AliExpress listing. Only adds
+    generic filler when no AliExpress description was scraped.
+    Never makes claims that aren't supported by the title or listing.
     """
     clean = clean_title(title)
     text = title.lower()
     scale = _detect_scale(title)
-    theme = _detect_theme(title)
     material = _detect_material(title)
     num = _detect_num_pieces(title)
 
+    # Extract real specs and features from AliExpress description
+    ali_specs, ali_features = _extract_specs_from_ali_desc(ali_description)
+    has_ali_data = bool(ali_specs or ali_features)
+
     sections = []
 
-    # --- Section 1: Product overview (2-3 sentences) ---
-    overview = clean + "."
-    if "Military" in theme:
-        overview += f" This {material.lower()} model kit captures the detail and character of military history."
-    elif "Fantasy" in theme:
-        overview += f" This {material.lower()} fantasy model kit features intricate sculpting and dynamic posing."
-    elif "Diorama" in theme:
-        overview += " These miniature figures are perfect for creating vivid, lifelike diorama scenes."
-    elif "Historical" in theme:
-        overview += f" This historically inspired {material.lower()} figure captures the period with authentic detail."
-    elif "Anime" in theme:
-        overview += f" This premium {material.lower()} collectible statue features high-quality sculpting and finish."
-    elif "Sports" in theme:
-        overview += " A fun and detailed collectible figure for sports fans and figure collectors alike."
-    else:
-        overview += f" This {material.lower()} model kit features carefully sculpted details for an impressive display piece."
-    sections.append(overview)
+    # --- Section 1: Product title as the opener ---
+    sections.append(clean + ".")
 
-    # Extract real specs from AliExpress description
-    ali_specs, ali_features = _extract_specs_from_ali_desc(ali_description)
-
-    # --- Section 2: Key specifications (if available) ---
-    # Build a clean spec list from both AliExpress data and title-detected info
+    # --- Section 2: Key specifications ---
+    # Prioritise specs from the actual listing, fill gaps from title only
     spec_items = []
+    # Add AliExpress specs first (these are from the real listing)
+    for label, val in ali_specs.items():
+        spec_items.append(f"{label}: {val}")
+    # Only add title-detected specs if the listing didn't provide them
     if material and "Material" not in ali_specs:
         spec_items.append(f"Material: {material}")
     if scale and "Scale" not in ali_specs:
         spec_items.append(f"Scale: {scale}")
     if num > 1 and "Pieces" not in ali_specs:
         spec_items.append(f"Pieces: {num}")
-    # Add AliExpress specs
-    for label, val in ali_specs.items():
-        spec_items.append(f"{label}: {val}")
     if spec_items:
-        # Format as a clean readable list using " // " separator (Amazon strips HTML)
         sections.append("Specifications: " + " // ".join(spec_items[:10]))
 
-    # --- Section 3: Features from AliExpress description ---
+    # --- Section 3: Product features from the actual listing ---
     if ali_features:
-        # Clean up and present as readable sentences
         clean_features = []
-        for feat in ali_features[:4]:
-            # Capitalise first letter, ensure ends with full stop
+        for feat in ali_features[:5]:
             feat = feat.strip()
             if feat:
                 feat = feat[0].upper() + feat[1:]
@@ -2255,23 +2239,24 @@ def make_description(title, ali_description=None):
         if clean_features:
             sections.append(" ".join(clean_features))
 
-    # --- Section 4: Kit details ---
+    # --- Section 4: Kit info (only state what the title confirms) ---
     kit_info = []
-    if "unpainted" in text or "unassembled" in text:
-        kit_info.append("Supplied unassembled and unpainted, giving you complete freedom to bring this model to life with your own colour scheme and finishing techniques.")
+    if "unpainted" in text and "unassembled" in text:
+        kit_info.append("This kit is supplied unassembled and unpainted.")
+    elif "unpainted" in text:
+        kit_info.append("This kit is supplied unpainted.")
+    elif "unassembled" in text:
+        kit_info.append("This kit requires assembly.")
     if num > 1:
-        kit_info.append(f"This set includes {num} individual figures, each with their own unique pose and character detail.")
+        kit_info.append(f"This set contains {num} pieces.")
     if kit_info:
         sections.append(" ".join(kit_info))
 
-    # --- Section 5: Closing ---
-    closing = f"Crafted from high-quality {material.lower()} for sharp detail and durability."
-    closing += " An excellent choice for collectors, painters, and hobbyists."
-    closing += " Please refer to the product images for full detail."
-    sections.append(closing)
+    # --- Section 5: Short closing ---
+    # Only if we have very little content, add a brief generic line
+    if not has_ali_data:
+        sections.append("Please see the product images for full detail on what is included.")
 
-    # Join sections with line breaks for readability
-    # Amazon flat file accepts newlines in description
     return "\n\n".join(sections)
 
 
