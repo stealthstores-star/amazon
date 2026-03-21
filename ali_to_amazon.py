@@ -1054,59 +1054,59 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 try:
                     s5_result = detail_tab.evaluate("""
                     () => {
+                        function extractDesc(html) {
+                            if (!html || html.length < 100) return null;
+                            if (!/<[a-z][^>]*>/i.test(html)) return null;
+                            const tmp = document.createElement('div');
+                            tmp.innerHTML = html;
+                            let firstImg = '';
+                            tmp.querySelectorAll('img').forEach(img => {
+                                if (firstImg) return;
+                                const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                    && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                            });
+                            tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                            let text = tmp.innerText.trim();
+                            if (text.length < 150) return null;
+                            if (/^Buy\\s/i.test(text)) return null;
+                            if (/^Smarter Shopping/i.test(text)) return null;
+                            return {text: text.substring(0, 3000), img: firstImg};
+                        }
                         const scripts = document.querySelectorAll('script');
                         for (const s of scripts) {
                             const t = s.textContent || '';
-                            if (t.length < 100 || t.length > 500000) continue;
+                            if (t.length < 200 || t.length > 500000) continue;
                             const patterns = [
-                                /"(?:description|descContent|detailDesc|descriptionContent|descriptionHtml)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
-                                /"(?:desc|itemDescription|product_description)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                                /"(?:descriptionContent|descriptionHtml|detailDesc|descContent)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                                /"(?:itemDescription|product_description|descriptionModule)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
                             ];
                             for (const p of patterns) {
                                 const m = t.match(p);
-                                if (m && m[1] && m[1].length > 50) {
+                                if (m && m[1] && m[1].length > 100) {
                                     let html = m[1];
                                     try { html = JSON.parse('"' + html + '"'); } catch(e) {}
-                                    const tmp = document.createElement('div');
-                                    tmp.innerHTML = html;
-                                    let firstImg = '';
-                                    tmp.querySelectorAll('img').forEach(img => {
-                                        if (firstImg) return;
-                                        const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                        if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                            && !src.includes('icon') && !src.includes('logo')) firstImg = src;
-                                    });
-                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                    let text = tmp.innerText.trim();
-                                    if (text.length >= 50)
-                                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                    const r = extractDesc(html);
+                                    if (r) return JSON.stringify(r);
                                 }
                             }
                         }
-                        // Also try window globals
                         const globals = [window.runParams, window.__INIT_DATA__,
                             window.runConfig, window.detailData, window.pageData, window.__pageData__];
                         function deepSearch(obj, depth) {
                             if (!obj || depth > 6) return null;
-                            if (typeof obj === 'string' && obj.length > 100 && obj.includes('<')) {
-                                const tmp = document.createElement('div');
-                                tmp.innerHTML = obj;
-                                let firstImg = '';
-                                tmp.querySelectorAll('img').forEach(img => {
-                                    if (firstImg) return;
-                                    const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                    if (src && (src.includes('alicdn') || src.includes('ae01'))
-                                        && !src.includes('icon') && !src.includes('logo')) firstImg = src;
-                                });
-                                tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                let text = tmp.innerText.trim();
-                                if (text.length >= 50) return {text: text.substring(0, 3000), img: firstImg};
+                            if (typeof obj === 'string' && obj.length > 200 && /<[a-z][^>]*>/i.test(obj)) {
+                                const r = extractDesc(obj);
+                                if (r) return r;
                             }
                             if (typeof obj !== 'object') return null;
                             try {
                                 for (const [k, v] of Object.entries(obj)) {
                                     const kl = k.toLowerCase();
-                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail') {
+                                    if (kl.includes('og') || kl.includes('meta') || kl.includes('seo')
+                                        || kl === 'title' || kl === 'name' || kl === 'subject') continue;
+                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail'
+                                        || kl === 'descriptionmodule') {
                                         const r = deepSearch(v, depth + 1);
                                         if (r) return r;
                                     }
@@ -1125,7 +1125,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     if s5_result:
                         import json as _json7b
                         parsed = _json7b.loads(s5_result)
-                        if parsed.get("text") and len(parsed["text"]) >= 50:
+                        if parsed.get("text") and len(parsed["text"]) >= 150:
                             desc_text = parsed["text"]
                             log.info("      Desc Strategy 5 (cached): got %d chars", len(desc_text))
                         s5_img = parsed.get("img", "")
@@ -1846,68 +1846,74 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 except Exception as e:
                     log.info("      Description extraction error: %s", str(e)[:120])
 
-            # Strategy 5: Deep search of page JS globals for description content
+            # Strategy 5: Deep search of page JS globals for REAL description content
+            # Must contain HTML markup (real descriptions have <p>, <div>, <img> tags)
+            # Must be long enough to not be a title/meta description
             if not desc_text:
                 log.info("      Desc: trying Strategy 5 (deep JS global search)...")
                 try:
                     s5_result = detail_tab.evaluate("""
                     () => {
+                        // Helper: validate that content is a real description, not a title/meta
+                        function extractDesc(html) {
+                            if (!html || html.length < 100) return null;
+                            // Must contain HTML tags — real descriptions have markup
+                            if (!/<[a-z][^>]*>/i.test(html)) return null;
+                            const tmp = document.createElement('div');
+                            tmp.innerHTML = html;
+                            let firstImg = '';
+                            tmp.querySelectorAll('img').forEach(img => {
+                                if (firstImg) return;
+                                const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                    && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                            });
+                            tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                            let text = tmp.innerText.trim();
+                            // Reject titles/meta descriptions (too short, starts with "Buy")
+                            if (text.length < 150) return null;
+                            if (/^Buy\\s/i.test(text)) return null;
+                            if (/^Smarter Shopping/i.test(text)) return null;
+                            return {text: text.substring(0, 3000), img: firstImg};
+                        }
                         // Deep search through all script tags for description HTML
                         const scripts = document.querySelectorAll('script');
                         for (const s of scripts) {
                             const t = s.textContent || '';
-                            if (t.length < 100 || t.length > 500000) continue;
-                            // Look for description HTML embedded in JSON
+                            if (t.length < 200 || t.length > 500000) continue;
+                            // Look for description HTML embedded in JSON — only keys that indicate item description
                             const patterns = [
-                                /"(?:description|descContent|detailDesc|descriptionContent|descriptionHtml)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
-                                /"(?:desc|itemDescription|product_description)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                                /"(?:descriptionContent|descriptionHtml|detailDesc|descContent)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                                /"(?:itemDescription|product_description|descriptionModule)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
                             ];
                             for (const p of patterns) {
                                 const m = t.match(p);
-                                if (m && m[1] && m[1].length > 50) {
+                                if (m && m[1] && m[1].length > 100) {
                                     let html = m[1];
-                                    // Unescape JSON string
                                     try { html = JSON.parse('"' + html + '"'); } catch(e) {}
-                                    const tmp = document.createElement('div');
-                                    tmp.innerHTML = html;
-                                    let firstImg = '';
-                                    tmp.querySelectorAll('img').forEach(img => {
-                                        if (firstImg) return;
-                                        const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                        if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                            && !src.includes('icon') && !src.includes('logo')) firstImg = src;
-                                    });
-                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                    let text = tmp.innerText.trim();
-                                    if (text.length >= 50)
-                                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                    const r = extractDesc(html);
+                                    if (r) return JSON.stringify(r);
                                 }
                             }
                         }
-                        // Also try window globals
+                        // Also try window globals — but only look for actual description content keys
                         const globals = [window.runParams, window.__INIT_DATA__,
                             window.runConfig, window.detailData, window.pageData, window.__pageData__];
                         function deepSearch(obj, depth) {
                             if (!obj || depth > 6) return null;
-                            if (typeof obj === 'string' && obj.length > 100 && obj.includes('<')) {
-                                const tmp = document.createElement('div');
-                                tmp.innerHTML = obj;
-                                let firstImg = '';
-                                tmp.querySelectorAll('img').forEach(img => {
-                                    if (firstImg) return;
-                                    const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                    if (src && (src.includes('alicdn') || src.includes('ae01'))
-                                        && !src.includes('icon') && !src.includes('logo')) firstImg = src;
-                                });
-                                tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                let text = tmp.innerText.trim();
-                                if (text.length >= 50) return {text: text.substring(0, 3000), img: firstImg};
+                            if (typeof obj === 'string' && obj.length > 200 && /<[a-z][^>]*>/i.test(obj)) {
+                                const r = extractDesc(obj);
+                                if (r) return r;
                             }
                             if (typeof obj !== 'object') return null;
                             try {
                                 for (const [k, v] of Object.entries(obj)) {
                                     const kl = k.toLowerCase();
-                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail') {
+                                    // Skip SEO/meta/og description keys — those are titles not descriptions
+                                    if (kl.includes('og') || kl.includes('meta') || kl.includes('seo')
+                                        || kl === 'title' || kl === 'name' || kl === 'subject') continue;
+                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail'
+                                        || kl === 'descriptionmodule') {
                                         const r = deepSearch(v, depth + 1);
                                         if (r) return r;
                                     }
@@ -1926,7 +1932,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     if s5_result:
                         import json as _json7
                         parsed = _json7.loads(s5_result)
-                        if parsed.get("text") and len(parsed["text"]) >= 50:
+                        if parsed.get("text") and len(parsed["text"]) >= 150:
                             desc_text = parsed["text"]
                             if not _store_desc_strategy:
                                 _store_desc_strategy = "s5"
