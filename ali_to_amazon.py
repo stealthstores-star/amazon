@@ -846,9 +846,11 @@ DETAIL_EXTRACT_JS = """
 
 # Cache for store-level moduleanalysis URL (same for all products in a store)
 _cached_moduleanalysis_url = ""
+# Track which desc strategy works for this store to skip slow ones
+_store_desc_strategy = ""  # e.g. "s2", "s4", "s5" — skip slow strategies if we know what works
 
 def scrape_product_detail(detail_tab, product_url, product_id, context=None, main_tab=None):
-    global _cached_moduleanalysis_url
+    global _cached_moduleanalysis_url, _store_desc_strategy
     """Visit a product detail page and extract all images + variations.
 
     Uses detail_tab (a dedicated tab) so the main search results tab is untouched.
@@ -1045,9 +1047,97 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             # Strategy 2: Scroll to description section and extract from DOM
             # Strategy 3: Use AliExpress API to get description HTML
 
+            # If we already know which strategy works for this store, try it first
+            # and skip slow strategies (especially Strategy 4's 2s+ wait)
+            if _store_desc_strategy == "s5" and not desc_text:
+                log.info("      Desc: trying Strategy 5 (cached as working for store)...")
+                try:
+                    s5_result = detail_tab.evaluate("""
+                    () => {
+                        const scripts = document.querySelectorAll('script');
+                        for (const s of scripts) {
+                            const t = s.textContent || '';
+                            if (t.length < 100 || t.length > 500000) continue;
+                            const patterns = [
+                                /"(?:description|descContent|detailDesc|descriptionContent|descriptionHtml)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                                /"(?:desc|itemDescription|product_description)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                            ];
+                            for (const p of patterns) {
+                                const m = t.match(p);
+                                if (m && m[1] && m[1].length > 50) {
+                                    let html = m[1];
+                                    try { html = JSON.parse('"' + html + '"'); } catch(e) {}
+                                    const tmp = document.createElement('div');
+                                    tmp.innerHTML = html;
+                                    let firstImg = '';
+                                    tmp.querySelectorAll('img').forEach(img => {
+                                        if (firstImg) return;
+                                        const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                        if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                            && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                                    });
+                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                    let text = tmp.innerText.trim();
+                                    if (text.length >= 50)
+                                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                }
+                            }
+                        }
+                        // Also try window globals
+                        const globals = [window.runParams, window.__INIT_DATA__,
+                            window.runConfig, window.detailData, window.pageData, window.__pageData__];
+                        function deepSearch(obj, depth) {
+                            if (!obj || depth > 6) return null;
+                            if (typeof obj === 'string' && obj.length > 100 && obj.includes('<')) {
+                                const tmp = document.createElement('div');
+                                tmp.innerHTML = obj;
+                                let firstImg = '';
+                                tmp.querySelectorAll('img').forEach(img => {
+                                    if (firstImg) return;
+                                    const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                    if (src && (src.includes('alicdn') || src.includes('ae01'))
+                                        && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                                });
+                                tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                let text = tmp.innerText.trim();
+                                if (text.length >= 50) return {text: text.substring(0, 3000), img: firstImg};
+                            }
+                            if (typeof obj !== 'object') return null;
+                            try {
+                                for (const [k, v] of Object.entries(obj)) {
+                                    const kl = k.toLowerCase();
+                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail') {
+                                        const r = deepSearch(v, depth + 1);
+                                        if (r) return r;
+                                    }
+                                }
+                            } catch(e) {}
+                            return null;
+                        }
+                        for (const g of globals) {
+                            if (!g) continue;
+                            const r = deepSearch(g, 0);
+                            if (r) return JSON.stringify(r);
+                        }
+                        return '';
+                    }
+                    """) or ""
+                    if s5_result:
+                        import json as _json7b
+                        parsed = _json7b.loads(s5_result)
+                        if parsed.get("text") and len(parsed["text"]) >= 50:
+                            desc_text = parsed["text"]
+                            log.info("      Desc Strategy 5 (cached): got %d chars", len(desc_text))
+                        s5_img = parsed.get("img", "")
+                        if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                            result["all_images"].append(s5_img)
+                            log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                except Exception:
+                    pass
+
             # Strategy 1: Search page source for description URL (skip if cache exists)
             desc_url = ""
-            if not _cached_moduleanalysis_url:
+            if not _cached_moduleanalysis_url and not desc_text:
                 log.info("      Desc: trying Strategy 1 (descriptionUrl in page source)...")
                 try:
                     desc_url = detail_tab.evaluate("""
@@ -1172,6 +1262,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     f"https://www.aliexpress.com/aer-api/module/item/description?productId={product_id}",
                     f"https://www.aliexpress.com/fn/item-description/index.html?productId={product_id}",
                     f"https://aeproductsourcesite.alicdn.com/product/description/pc/{product_id}.html",
+                    f"https://www.aliexpress.com/aeglobal/ae/item/description/query?productId={product_id}",
+                    f"https://www.aliexpress.com/aer-jsonapi/module/item/description?productId={product_id}",
                 ])
                 for api_url in api_urls:
                     if desc_text:
@@ -1280,6 +1372,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 desc_text = ""
                             if desc_text:
                                 log.info("      Desc Strategy 2: got %d chars from %s", len(desc_text), api_url[:80])
+                                if not _store_desc_strategy:
+                                    _store_desc_strategy = "s2"
                             # Cache moduleanalysis URL if it worked
                             if "moduleanalysis" in api_url:
                                 _cached_moduleanalysis_url = api_url
@@ -1381,8 +1475,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     log.info("      Desc Strategy 3 error: %s", str(e)[:120])
 
             # Strategy 4: Intercept network requests + click View More
-            # Capture the actual description URL that AliExpress fetches
-            if not desc_text:
+            # Skip if Strategy 5 is known to work for this store (saves ~5s per product)
+            if not desc_text and _store_desc_strategy != "s5":
                 log.info("      Desc: trying Strategy 4 (network intercept + View More)...")
                 try:
                     # Set up network request capture BEFORE clicking View More
@@ -1391,7 +1485,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         try:
                             url = response.url
                             # Capture description-related responses
-                            if any(k in url.lower() for k in ["desc", "description", "detail-desc"]):
+                            if any(k in url.lower() for k in ["desc", "description", "detail-desc",
+                                    "moduleanalysis", "item/detail", "richtext", "item-description"]):
                                 ct = response.headers.get("content-type", "")
                                 captured_urls.append({"url": url, "status": response.status, "ct": ct})
                         except Exception:
@@ -1633,7 +1728,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             except Exception:
                                 continue
 
-                    # If still no desc, try main document extraction
+                    # If still no desc, try main document extraction with broad selectors
                     if not desc_text:
                         try:
                             main_result = detail_tab.evaluate("""
@@ -1641,8 +1736,15 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 const sels = ['.product-description', '.detailmodule_html',
                                     '.detail-desc-decorate-richtext', '#product-description',
                                     '[class*="product-description"]', '[class*="detail-desc"]',
-                                    '[data-pl="product-description"]'];
+                                    '[data-pl="product-description"]',
+                                    '[class*="description--wrap"]', '[class*="description--store"]',
+                                    '[class*="ItemDescription"]', '[class*="item-description"]',
+                                    '[class*="desc-content"]', '[class*="desc_rich"]',
+                                    '[class*="richtext-detail"]', '[class*="detail-content"]',
+                                    '[class*="sku-property"]',
+                                    'div[data-spm="description"]', 'div[data-aplus-ae]'];
                                 for (const sel of sels) {
+                                    try {
                                     const els = document.querySelectorAll(sel);
                                     for (const el of els) {
                                         if (!el) continue;
@@ -1671,7 +1773,53 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                             return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
                                         }
                                     }
+                                    } catch(e) {}
                                 }
+                                // Last resort: find any large text block below the "Description" heading
+                                try {
+                                    const headings = document.querySelectorAll('h2, h3, h4, div, span');
+                                    for (const h of headings) {
+                                        const ht = (h.innerText || '').trim().toLowerCase();
+                                        if (ht === 'description' || ht === 'product description') {
+                                            let sibling = h.nextElementSibling;
+                                            for (let i = 0; i < 5 && sibling; i++) {
+                                                const clone = sibling.cloneNode(true);
+                                                clone.querySelectorAll('script, style').forEach(e => e.remove());
+                                                let text = clone.innerText.trim();
+                                                let firstImg = '';
+                                                sibling.querySelectorAll('img').forEach(img => {
+                                                    if (firstImg) return;
+                                                    const src = img.src || img.getAttribute('data-src') || '';
+                                                    if (src && src.includes('alicdn') && !src.includes('icon')
+                                                        && !src.includes('logo')) firstImg = src;
+                                                });
+                                                if (text.length >= 50 || firstImg)
+                                                    return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                                sibling = sibling.nextElementSibling;
+                                            }
+                                            // Also check parent's next sibling
+                                            let parent = h.parentElement;
+                                            if (parent) {
+                                                sibling = parent.nextElementSibling;
+                                                for (let i = 0; i < 3 && sibling; i++) {
+                                                    const clone = sibling.cloneNode(true);
+                                                    clone.querySelectorAll('script, style').forEach(e => e.remove());
+                                                    let text = clone.innerText.trim();
+                                                    let firstImg = '';
+                                                    sibling.querySelectorAll('img').forEach(img => {
+                                                        if (firstImg) return;
+                                                        const src = img.src || img.getAttribute('data-src') || '';
+                                                        if (src && src.includes('alicdn') && !src.includes('icon')
+                                                            && !src.includes('logo')) firstImg = src;
+                                                    });
+                                                    if (text.length >= 50 || firstImg)
+                                                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                                    sibling = sibling.nextElementSibling;
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch(e) {}
                                 return '';
                             }
                             """) or ""
@@ -1697,6 +1845,99 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         pass
                 except Exception as e:
                     log.info("      Description extraction error: %s", str(e)[:120])
+
+            # Strategy 5: Deep search of page JS globals for description content
+            if not desc_text:
+                log.info("      Desc: trying Strategy 5 (deep JS global search)...")
+                try:
+                    s5_result = detail_tab.evaluate("""
+                    () => {
+                        // Deep search through all script tags for description HTML
+                        const scripts = document.querySelectorAll('script');
+                        for (const s of scripts) {
+                            const t = s.textContent || '';
+                            if (t.length < 100 || t.length > 500000) continue;
+                            // Look for description HTML embedded in JSON
+                            const patterns = [
+                                /"(?:description|descContent|detailDesc|descriptionContent|descriptionHtml)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                                /"(?:desc|itemDescription|product_description)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
+                            ];
+                            for (const p of patterns) {
+                                const m = t.match(p);
+                                if (m && m[1] && m[1].length > 50) {
+                                    let html = m[1];
+                                    // Unescape JSON string
+                                    try { html = JSON.parse('"' + html + '"'); } catch(e) {}
+                                    const tmp = document.createElement('div');
+                                    tmp.innerHTML = html;
+                                    let firstImg = '';
+                                    tmp.querySelectorAll('img').forEach(img => {
+                                        if (firstImg) return;
+                                        const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                        if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                            && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                                    });
+                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                    let text = tmp.innerText.trim();
+                                    if (text.length >= 50)
+                                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                }
+                            }
+                        }
+                        // Also try window globals
+                        const globals = [window.runParams, window.__INIT_DATA__,
+                            window.runConfig, window.detailData, window.pageData, window.__pageData__];
+                        function deepSearch(obj, depth) {
+                            if (!obj || depth > 6) return null;
+                            if (typeof obj === 'string' && obj.length > 100 && obj.includes('<')) {
+                                const tmp = document.createElement('div');
+                                tmp.innerHTML = obj;
+                                let firstImg = '';
+                                tmp.querySelectorAll('img').forEach(img => {
+                                    if (firstImg) return;
+                                    const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                                    if (src && (src.includes('alicdn') || src.includes('ae01'))
+                                        && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                                });
+                                tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                let text = tmp.innerText.trim();
+                                if (text.length >= 50) return {text: text.substring(0, 3000), img: firstImg};
+                            }
+                            if (typeof obj !== 'object') return null;
+                            try {
+                                for (const [k, v] of Object.entries(obj)) {
+                                    const kl = k.toLowerCase();
+                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail') {
+                                        const r = deepSearch(v, depth + 1);
+                                        if (r) return r;
+                                    }
+                                }
+                            } catch(e) {}
+                            return null;
+                        }
+                        for (const g of globals) {
+                            if (!g) continue;
+                            const r = deepSearch(g, 0);
+                            if (r) return JSON.stringify(r);
+                        }
+                        return '';
+                    }
+                    """) or ""
+                    if s5_result:
+                        import json as _json7
+                        parsed = _json7.loads(s5_result)
+                        if parsed.get("text") and len(parsed["text"]) >= 50:
+                            desc_text = parsed["text"]
+                            if not _store_desc_strategy:
+                                _store_desc_strategy = "s5"
+                                log.info("      Desc: CACHED Strategy 5 as working for this store (faster for remaining products)")
+                            log.info("      Desc Strategy 5: got %d chars from JS globals", len(desc_text))
+                        s5_img = parsed.get("img", "")
+                        if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                            result["all_images"].append(s5_img)
+                            log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                except Exception as e:
+                    log.info("      Desc Strategy 5 error: %s", str(e)[:120])
 
             if specs_text:
                 log.info("      Specs: %s", specs_text[:120])
@@ -3850,7 +4091,7 @@ def post_process(csv_path):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    global _cached_moduleanalysis_url
+    global _cached_moduleanalysis_url, _store_desc_strategy
     parser = argparse.ArgumentParser(
         description="Scrape AliExpress products and generate Amazon bulk upload file"
     )
@@ -4039,6 +4280,7 @@ def main():
 
             # Reset store-level cache for new URL
             _cached_moduleanalysis_url = ""
+            _store_desc_strategy = ""
 
             ensure_browser()
 
