@@ -3987,4 +3987,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    # Allow running just post-processing on an existing CSV:
+    #   python3 ali_to_amazon.py --post-process <csv_file>
+    if len(sys.argv) >= 3 and sys.argv[1] == "--post-process":
+        post_process(sys.argv[2])
+    else:
+        main()
