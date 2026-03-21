@@ -872,9 +872,9 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         def _early_on_response(response):
             try:
                 url = response.url
-                if "moduleanalysis" in url and response.status == 200:
+                if "moduleanalysis" in url and "analysis.json" in url and response.status == 200:
                     _early_captured_module_url.append(url)
-                elif "desc" in url.lower() and ("json" in (response.headers.get("content-type", "") or "")) and response.status == 200:
+                elif "item/desc" in url.lower() and response.status == 200:
                     _early_captured_module_url.append(url)
             except Exception:
                 pass
@@ -1211,7 +1211,12 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         import json as _json_pt
                         parsed_pt = _json_pt.loads(pt_result)
                         _pt = (parsed_pt.get("text") or "").strip()
-                        if _pt and len(_pt) >= 30:
+                        # Reject if description is collapsed (starts with View more/Show more)
+                        # or if it grabbed Q&A / review content instead
+                        _pt_bad = (_pt.startswith("View more") or _pt.startswith("Show more")
+                                   or _pt.startswith("See more") or "Buyer Questions" in _pt[:100]
+                                   or "Reviews" in _pt[:50])
+                        if _pt and len(_pt) >= 30 and not _pt_bad:
                             desc_text = _pt
                             log.info("      Desc: got %d chars from page text (fast path)", len(desc_text))
                             pt_img = parsed_pt.get("img", "")
@@ -1581,7 +1586,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 if not _store_desc_strategy:
                                     _store_desc_strategy = "s2"
                             # Cache moduleanalysis URL if it worked
-                            if "moduleanalysis" in api_url:
+                            if "moduleanalysis" in api_url and "analysis.json" in api_url:
                                 _cached_moduleanalysis_url = api_url
                     except Exception:
                         pass
@@ -1837,7 +1842,10 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 parsed_vm = _json_vm.loads(vm_result)
                                 t = (parsed_vm.get("text") or "").strip()
                                 img = parsed_vm.get("img", "")
-                                if t and len(t) >= 30:
+                                _t_bad = (t.startswith("View more") or t.startswith("Show more")
+                                          or t.startswith("See more") or "Buyer Questions" in t[:100]
+                                          or "Reviews" in t[:50])
+                                if t and len(t) >= 30 and not _t_bad:
                                     desc_text = t
                                     log.info("      Desc: got %d chars from page text (Description section)", len(desc_text))
                                     if not _store_desc_strategy:
@@ -1862,16 +1870,20 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             log.info("      Desc captured: %s (status=%s, ct=%s, desc=%s)",
                                      cu["url"][:120], cu["status"], cu["ct"][:40], cu.get("is_desc"))
                             # Cache moduleanalysis URL for reuse across products
-                            if "moduleanalysis" in cu["url"] and int(cu["status"]) == 200:
+                            if "moduleanalysis" in cu["url"] and "analysis.json" in cu["url"] and int(cu["status"]) == 200:
                                 _cached_moduleanalysis_url = cu["url"]
                                 log.info("      Desc: CACHED moduleanalysis URL for store")
 
                     # Try to fetch each captured URL for description content
+                    # Only try desc-related URLs, skip recommendation/analytics garbage
                     desc_img = ""
                     for cu in captured_urls:
                         if desc_text:
                             break
                         if cu["status"] != 200:
+                            continue
+                        # Skip non-desc URLs (recommendation API, wp.html, etc)
+                        if not cu.get("is_desc"):
                             continue
                         try:
                             fetch_result = detail_tab.evaluate("""
@@ -2068,8 +2080,11 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             if main_result:
                                 import json as _json6
                                 parsed = _json6.loads(main_result)
-                                if parsed.get("text") and len(parsed.get("text", "")) >= 30:
-                                    desc_text = parsed["text"]
+                                _fb = (parsed.get("text") or "").strip()
+                                _fb_bad = (_fb.startswith("View more") or _fb.startswith("Show more")
+                                           or "Buyer Questions" in _fb[:100] or "Reviews" in _fb[:50])
+                                if _fb and len(_fb) >= 30 and not _fb_bad:
+                                    desc_text = _fb
                                     log.info("      Desc: got %d chars from page text fallback", len(desc_text))
                                 if parsed.get("img") and not desc_img:
                                     desc_img = parsed["img"]
