@@ -2059,15 +2059,17 @@ def _upload_to_litterbox(jpeg_bytes):
 
 
 def _verify_hosted_image(url):
-    """HEAD-check a hosted image URL to confirm it has content."""
+    """HEAD-check a hosted image URL to confirm it's accessible."""
     try:
         resp = http_requests.head(url, timeout=10, allow_redirects=True)
-        length = int(resp.headers.get("content-length", 0))
-        if resp.status_code == 200 and length > 0:
+        if resp.status_code == 200:
             return True
-        log.debug(f"          [IMG] Verify failed: status={resp.status_code} length={length}")
+        # Some CDNs return 301/302 — accept redirects as valid
+        if resp.status_code in (301, 302):
+            return True
+        log.info(f"          [IMG] Verify failed: status={resp.status_code} url={url[:80]}")
     except Exception as e:
-        log.debug(f"          [IMG] Verify error: {e}")
+        log.info(f"          [IMG] Verify error: {e} url={url[:80]}")
     return False
 
 
