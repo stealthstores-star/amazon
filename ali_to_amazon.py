@@ -1163,6 +1163,64 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             except Exception:
                 pass
 
+            # FAST PATH: Try simple page text extraction first — works for ALL stores
+            # The page text always has: \nDescription\n[content]\nAdditional regulatory
+            # No CSS classes, no APIs, no iframes — just text on the page
+            if not desc_text:
+                try:
+                    pt_result = detail_tab.evaluate("""
+                    () => {
+                        const fullText = document.body.innerText;
+                        let descIdx = -1;
+                        const markers = ['\\nDescription\\nreport\\n', '\\nDescription\\n'];
+                        for (const marker of markers) {
+                            const idx = fullText.indexOf(marker);
+                            if (idx >= 0) { descIdx = idx + marker.length; break; }
+                        }
+                        if (descIdx < 0) return '';
+                        let descContent = fullText.substring(descIdx).replace(/^report\\s*\\n?/, '');
+                        const endMarkers = ['Additional regulatory', 'Product compliance',
+                                            '\\nSold By\\n', '\\nService commitment\\n'];
+                        for (const end of endMarkers) {
+                            const idx = descContent.indexOf(end);
+                            if (idx > 0) { descContent = descContent.substring(0, idx); break; }
+                        }
+                        descContent = descContent.trim();
+                        if (descContent.length < 30) return '';
+                        // Find description images
+                        let firstImg = '';
+                        const snippet = descContent.substring(0, 40);
+                        const allEls = document.querySelectorAll('div, section, article, p');
+                        for (const el of allEls) {
+                            if (el.innerText && el.innerText.includes(snippet)) {
+                                el.querySelectorAll('img').forEach(img => {
+                                    if (firstImg) return;
+                                    const src = img.src || img.getAttribute('data-src') || '';
+                                    if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                        && !src.includes('icon') && !src.includes('logo')
+                                        && !src.includes('thumbnail') && !src.includes('avatar')
+                                        && !src.includes('flag')) firstImg = src;
+                                });
+                                if (firstImg) break;
+                            }
+                        }
+                        return JSON.stringify({text: descContent.substring(0, 3000), img: firstImg});
+                    }
+                    """) or ""
+                    if pt_result:
+                        import json as _json_pt
+                        parsed_pt = _json_pt.loads(pt_result)
+                        _pt = (parsed_pt.get("text") or "").strip()
+                        if _pt and len(_pt) >= 30:
+                            desc_text = _pt
+                            log.info("      Desc: got %d chars from page text (fast path)", len(desc_text))
+                            pt_img = parsed_pt.get("img", "")
+                            if pt_img and pt_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                result["all_images"].append(pt_img)
+                                log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                except Exception:
+                    pass
+
             # If we already know which strategy works for this store, try it first
             # and skip slow strategies (especially Strategy 4's 2s+ wait)
             if _store_desc_strategy == "s5" and not desc_text:
@@ -1712,113 +1770,78 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     # Wait for content to appear (network fetch or CSS toggle)
                     detail_tab.wait_for_timeout(2000)
 
-                    # IMMEDIATE DOM scan after View More click — catches CSS-toggled content
-                    # that was hidden and is now visible (no network request needed)
+                    # Extract description from page text — works for ALL AliExpress stores
+                    # The page always has: Description\nreport\n[content]\nAdditional regulatory
+                    # This is the same text visible on the page, no API or CSS class needed
                     if not desc_text:
                         try:
                             vm_result = detail_tab.evaluate("""
                             () => {
-                                // After View More click, look for any large visible text block
-                                // that looks like a product description
-                                // Try known description containers first
-                                const sels = [
-                                    '[class*="product-description"]', '[class*="detail-desc"]',
-                                    '[class*="description--"]', '[class*="ItemDescription"]',
-                                    '[class*="desc-content"]', '[class*="desc_rich"]',
-                                    '[class*="richtext"]', '[class*="detail-content"]',
-                                    '.product-description', '.detailmodule_html',
-                                    '#product-description', '[data-pl="product-description"]',
-                                    'div[data-spm="description"]',
-                                    // Newer AliExpress patterns
-                                    '[class*="expand"]', '[class*="toggle-content"]',
-                                    '[class*="collapse"][class*="show"]',
-                                    '[class*="description"][class*="content"]',
-                                ];
-                                for (const sel of sels) {
-                                    try {
-                                        const els = document.querySelectorAll(sel);
-                                        for (const el of els) {
-                                            if (!el) continue;
-                                            // Skip invisible elements
-                                            const style = window.getComputedStyle(el);
-                                            if (style.display === 'none' || style.visibility === 'hidden') continue;
-                                            // Check for substantial content
-                                            const clone = el.cloneNode(true);
-                                            // Get first description image before removing
-                                            let firstImg = '';
-                                            el.querySelectorAll('img').forEach(img => {
-                                                if (firstImg) return;
-                                                const src = img.src || img.getAttribute('data-src') || '';
-                                                if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                                    && !src.includes('icon') && !src.includes('logo')
-                                                    && !src.includes('thumbnail')) firstImg = src;
-                                            });
-                                            clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
-                                            let text = clone.innerText.trim();
-                                            // Skip placeholder text
-                                            const stripped = text.toLowerCase().replace(/[^a-z]/g, '');
-                                            if (['description','descriptionreportviewmore','descriptionviewmore',
-                                                 'viewmore','descriptionreport','showmore','seemore'].includes(stripped)) continue;
-                                            // Cut at regulatory section
-                                            for (const cut of ['additional regulatory', 'regulatory information',
-                                                               'shipping info', 'return policy']) {
-                                                const idx = text.toLowerCase().indexOf(cut);
-                                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
-                                            }
-                                            if (text.length >= 50 || firstImg)
-                                                return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
-                                        }
-                                    } catch(e) {}
+                                // Get the full page text and find the Description section
+                                const fullText = document.body.innerText;
+                                // Find "Description" section marker (not in tab bar — look for it
+                                // followed by actual content, not just other tab names)
+                                let descIdx = -1;
+                                const markers = ['\\nDescription\\nreport\\n', '\\nDescription\\n'];
+                                for (const marker of markers) {
+                                    const idx = fullText.indexOf(marker);
+                                    if (idx >= 0) {
+                                        descIdx = idx + marker.length;
+                                        break;
+                                    }
                                 }
-                                // Broader fallback: find ANY large visible text block near the View More area
-                                // Walk the DOM looking for containers with substantial text
-                                const allDivs = document.querySelectorAll('div, section, article');
-                                for (const div of allDivs) {
-                                    try {
-                                        const style = window.getComputedStyle(div);
-                                        if (style.display === 'none' || style.visibility === 'hidden') continue;
-                                        // Only check leaf-ish containers (not too many children)
-                                        if (div.children.length > 50) continue;
-                                        const html = div.innerHTML;
-                                        // Must have substantial HTML with images or formatted text
-                                        if (html.length < 200) continue;
-                                        // Must contain img tags with alicdn sources — description sections have product images
-                                        const hasDescImg = /<img[^>]+(?:alicdn|ae01|ae04)[^>]+>/i.test(html);
-                                        if (!hasDescImg) continue;
-                                        let firstImg = '';
-                                        div.querySelectorAll('img').forEach(img => {
+                                if (descIdx < 0) return '';
+
+                                // Extract text from Description to Additional regulatory
+                                let descContent = fullText.substring(descIdx);
+                                // Remove "report" prefix if present
+                                descContent = descContent.replace(/^report\\s*\\n?/, '');
+                                // Cut at regulatory section or other end markers
+                                const endMarkers = ['Additional regulatory', 'Product compliance',
+                                                    '\\nSold By\\n', '\\nService commitment\\n'];
+                                for (const end of endMarkers) {
+                                    const idx = descContent.indexOf(end);
+                                    if (idx > 0) { descContent = descContent.substring(0, idx); break; }
+                                }
+                                descContent = descContent.trim();
+                                if (descContent.length < 30) return '';
+
+                                // Now find description images — look for the Description section
+                                // element in the DOM and grab alicdn images from it
+                                let firstImg = '';
+                                // Find the element containing our extracted text (first 40 chars)
+                                const snippet = descContent.substring(0, 40);
+                                const allEls = document.querySelectorAll('div, section, article, p');
+                                for (const el of allEls) {
+                                    if (el.innerText && el.innerText.includes(snippet)) {
+                                        // Found the description container — get images
+                                        el.querySelectorAll('img').forEach(img => {
                                             if (firstImg) return;
                                             const src = img.src || img.getAttribute('data-src') || '';
                                             if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
                                                 && !src.includes('icon') && !src.includes('logo')
-                                                && !src.includes('thumbnail') && !src.includes('avatar')) firstImg = src;
-                                        });
-                                        const clone = div.cloneNode(true);
-                                        clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
-                                        let text = clone.innerText.trim();
-                                        // Must be a real description, not navigation or headers
-                                        if (text.length >= 100 || firstImg) {
-                                            for (const cut of ['additional regulatory', 'regulatory information']) {
-                                                const idx = text.toLowerCase().indexOf(cut);
-                                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                                && !src.includes('thumbnail') && !src.includes('avatar')
+                                                && !src.includes('flag')) {
+                                                firstImg = src;
                                             }
-                                            return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
-                                        }
-                                    } catch(e) {}
+                                        });
+                                        if (firstImg) break;
+                                    }
                                 }
-                                return '';
+
+                                return JSON.stringify({text: descContent.substring(0, 3000), img: firstImg});
                             }
                             """) or ""
                             if vm_result:
                                 import json as _json_vm
                                 parsed_vm = _json_vm.loads(vm_result)
-                                t = parsed_vm.get("text", "")
+                                t = (parsed_vm.get("text") or "").strip()
                                 img = parsed_vm.get("img", "")
-                                if t and len(t) >= 50 and not t.startswith("Buy "):
+                                if t and len(t) >= 30:
                                     desc_text = t
-                                    log.info("      Desc: got %d chars from DOM after View More click", len(desc_text))
+                                    log.info("      Desc: got %d chars from page text (Description section)", len(desc_text))
                                     if not _store_desc_strategy:
-                                        _store_desc_strategy = "s4dom"
+                                        _store_desc_strategy = "s4text"
                                 if img and img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
                                     result["all_images"].append(img)
                                     log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
@@ -2001,106 +2024,53 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             except Exception:
                                 continue
 
-                    # If still no desc, try main document extraction with broad selectors
+                    # If still no desc, try page text extraction (same approach as above)
                     if not desc_text:
                         try:
                             main_result = detail_tab.evaluate("""
                             () => {
-                                const sels = ['.product-description', '.detailmodule_html',
-                                    '.detail-desc-decorate-richtext', '#product-description',
-                                    '[class*="product-description"]', '[class*="detail-desc"]',
-                                    '[data-pl="product-description"]',
-                                    '[class*="description--wrap"]', '[class*="description--store"]',
-                                    '[class*="ItemDescription"]', '[class*="item-description"]',
-                                    '[class*="desc-content"]', '[class*="desc_rich"]',
-                                    '[class*="richtext-detail"]', '[class*="detail-content"]',
-                                    '[class*="sku-property"]',
-                                    'div[data-spm="description"]', 'div[data-aplus-ae]'];
-                                for (const sel of sels) {
-                                    try {
-                                    const els = document.querySelectorAll(sel);
-                                    for (const el of els) {
-                                        if (!el) continue;
-                                        const clone = el.cloneNode(true);
-                                        clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
-                                        let text = clone.innerText.trim();
-                                        const stripped = text.toLowerCase().replace(/[^a-z]/g, '');
-                                        if (['description','descriptionreportviewmore','descriptionviewmore',
-                                             'viewmore','descriptionreport'].includes(stripped)) continue;
-                                        for (const cut of ['additional regulatory', 'regulatory information',
-                                                           'shipping info', 'return policy']) {
-                                            const idx = text.toLowerCase().indexOf(cut);
-                                            if (idx > 0) { text = text.substring(0, idx).trim(); break; }
-                                        }
-                                        // Get 1st description image
-                                        let firstImg = '';
+                                const fullText = document.body.innerText;
+                                let descIdx = -1;
+                                const markers = ['\\nDescription\\nreport\\n', '\\nDescription\\n'];
+                                for (const marker of markers) {
+                                    const idx = fullText.indexOf(marker);
+                                    if (idx >= 0) { descIdx = idx + marker.length; break; }
+                                }
+                                if (descIdx < 0) return '';
+                                let descContent = fullText.substring(descIdx).replace(/^report\\s*\\n?/, '');
+                                const endMarkers = ['Additional regulatory', 'Product compliance',
+                                                    '\\nSold By\\n', '\\nService commitment\\n'];
+                                for (const end of endMarkers) {
+                                    const idx = descContent.indexOf(end);
+                                    if (idx > 0) { descContent = descContent.substring(0, idx); break; }
+                                }
+                                descContent = descContent.trim();
+                                if (descContent.length < 30) return '';
+                                let firstImg = '';
+                                const snippet = descContent.substring(0, 40);
+                                const allEls = document.querySelectorAll('div, section, article, p');
+                                for (const el of allEls) {
+                                    if (el.innerText && el.innerText.includes(snippet)) {
                                         el.querySelectorAll('img').forEach(img => {
                                             if (firstImg) return;
                                             const src = img.src || img.getAttribute('data-src') || '';
-                                            if (src && src.includes('alicdn') && !src.includes('icon')
-                                                && !src.includes('logo') && !src.includes('thumbnail')) {
-                                                firstImg = src;
-                                            }
+                                            if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                                && !src.includes('icon') && !src.includes('logo')
+                                                && !src.includes('thumbnail') && !src.includes('avatar')
+                                                && !src.includes('flag')) firstImg = src;
                                         });
-                                        if (text.length >= 50 || firstImg) {
-                                            return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
-                                        }
+                                        if (firstImg) break;
                                     }
-                                    } catch(e) {}
                                 }
-                                // Last resort: find any large text block below the "Description" heading
-                                try {
-                                    const headings = document.querySelectorAll('h2, h3, h4, div, span');
-                                    for (const h of headings) {
-                                        const ht = (h.innerText || '').trim().toLowerCase();
-                                        if (ht === 'description' || ht === 'product description') {
-                                            let sibling = h.nextElementSibling;
-                                            for (let i = 0; i < 5 && sibling; i++) {
-                                                const clone = sibling.cloneNode(true);
-                                                clone.querySelectorAll('script, style').forEach(e => e.remove());
-                                                let text = clone.innerText.trim();
-                                                let firstImg = '';
-                                                sibling.querySelectorAll('img').forEach(img => {
-                                                    if (firstImg) return;
-                                                    const src = img.src || img.getAttribute('data-src') || '';
-                                                    if (src && src.includes('alicdn') && !src.includes('icon')
-                                                        && !src.includes('logo')) firstImg = src;
-                                                });
-                                                if (text.length >= 50 || firstImg)
-                                                    return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
-                                                sibling = sibling.nextElementSibling;
-                                            }
-                                            // Also check parent's next sibling
-                                            let parent = h.parentElement;
-                                            if (parent) {
-                                                sibling = parent.nextElementSibling;
-                                                for (let i = 0; i < 3 && sibling; i++) {
-                                                    const clone = sibling.cloneNode(true);
-                                                    clone.querySelectorAll('script, style').forEach(e => e.remove());
-                                                    let text = clone.innerText.trim();
-                                                    let firstImg = '';
-                                                    sibling.querySelectorAll('img').forEach(img => {
-                                                        if (firstImg) return;
-                                                        const src = img.src || img.getAttribute('data-src') || '';
-                                                        if (src && src.includes('alicdn') && !src.includes('icon')
-                                                            && !src.includes('logo')) firstImg = src;
-                                                    });
-                                                    if (text.length >= 50 || firstImg)
-                                                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
-                                                    sibling = sibling.nextElementSibling;
-                                                }
-                                            }
-                                        }
-                                    }
-                                } catch(e) {}
-                                return '';
+                                return JSON.stringify({text: descContent.substring(0, 3000), img: firstImg});
                             }
                             """) or ""
                             if main_result:
                                 import json as _json6
                                 parsed = _json6.loads(main_result)
-                                if parsed.get("text") and len(parsed["text"]) >= 50:
+                                if parsed.get("text") and len(parsed.get("text", "")) >= 30:
                                     desc_text = parsed["text"]
+                                    log.info("      Desc: got %d chars from page text fallback", len(desc_text))
                                 if parsed.get("img") and not desc_img:
                                     desc_img = parsed["img"]
                         except Exception:
