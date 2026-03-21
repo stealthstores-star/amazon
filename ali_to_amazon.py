@@ -513,87 +513,69 @@ DETAIL_EXTRACT_JS = """
         result.images.push(src);
     }
 
-    // --- Strategy 1 (BEST): Extract from page data / runParams / SSR data ---
-    // AliExpress embeds product data in script tags as JSON
-    const html = document.documentElement.innerHTML;
+    // --- Strategy 1 (BEST): Gallery thumbnail images from the DOM ---
+    // These are the small thumbnails on the LEFT side of the product page.
+    // They represent exactly the images shown in the gallery — nothing more.
+    // The main large image is always one of these thumbnails expanded.
 
-    // Look for imagePathList in any script or data attribute
-    const imgListPatterns = [
-        /"imagePathList"\\s*:\\s*\\[([^\\]]+)\\]/,
-        /"imagePath(?:List|s)"\\s*:\\s*\\[([^\\]]+)\\]/,
-        /"productImageList"\\s*:\\s*\\[([^\\]]+)\\]/,
-    ];
-    for (const pattern of imgListPatterns) {
-        const match = html.match(pattern);
-        if (match) {
-            const urls = match[1].match(/"((?:https?:|\\/)?\\/\\/[^"]+)"/g);
-            if (urls) {
-                for (let url of urls) {
-                    url = url.replace(/"/g, '').replace(/\\\\/g, '/');
-                    addImage(url);
-                }
-            }
-        }
-    }
-
-    // Also look for individual image URLs in data patterns
-    const imgUrlPattern = /(?:https?:)?\\/\\/[a-z0-9]+\\.alicdn\\.com\\/[^"'\\s,}]+\\.(?:jpg|jpeg|png|webp)/gi;
-    // Only search in script tags (not the whole page, to avoid noise)
-    const scripts = document.querySelectorAll('script');
-    for (const script of scripts) {
-        const text = script.textContent || '';
-        if (text.length < 100) continue;
-        // Only look in scripts that seem to contain product data
-        if (!text.includes('imagePathList') && !text.includes('imagePath') &&
-            !text.includes('productImage') && !text.includes('skuAttr')) continue;
-        const matches = text.match(imgUrlPattern);
-        if (matches) {
-            for (const url of matches) {
-                addImage(url);
-            }
-        }
-    }
-
-    // --- Strategy 2: Gallery DOM elements (ONLY if JSON imagePathList gave nothing) ---
-    const skipDomImages = result.images.length > 0;  // imagePathList is authoritative
-    const gallerySelectors = [
-        '.image-view-magnifier-wrap img',
+    // Find the thumbnail container — small images stacked vertically on the left
+    const thumbSelectors = [
         '.images-view-item img',
-        '[class*="slider"] img[src*="alicdn"]',
-        '[class*="gallery"] img[src*="alicdn"]',
-        '[class*="image-view"] img',
-        '.product-image-panel img',
-        '.mag-img img',
+        '[class*="slider--item"] img',
         '[class*="thumbnail"] img[src*="alicdn"]',
-        '.images-view-wrap img',
-        '[class*="PicGallery"] img',
         '[class*="pic-gallery"] img',
-        '[class*="product-image"] img',
-        // Modern AliExpress layouts
-        'div[class*="gallery"] img',
-        'div[class*="slider"] img',
-        'picture source[srcset*="alicdn"]',
+        '[class*="PicGallery"] img',
+        '.images-view-wrap img',
     ];
+    for (const sel of thumbSelectors) {
+        try {
+            const els = document.querySelectorAll(sel);
+            for (const el of els) {
+                const src = el.getAttribute('src') || el.getAttribute('data-src') || '';
+                addImage(src);
+            }
+        } catch(e) {}
+        if (result.images.length > 0) break;
+    }
 
-    if (!skipDomImages) {
-        for (const sel of gallerySelectors) {
+    // Also get the main/large image (in case thumbnails didn't load)
+    if (result.images.length === 0) {
+        const mainSelectors = [
+            '.image-view-magnifier-wrap img',
+            '[class*="image-view"] img',
+            '.mag-img img',
+            '.product-image-panel img',
+        ];
+        for (const sel of mainSelectors) {
             try {
                 const els = document.querySelectorAll(sel);
                 for (const el of els) {
-                    const src = el.getAttribute('src') || el.getAttribute('data-src') ||
-                                el.getAttribute('srcset') || '';
+                    const src = el.getAttribute('src') || el.getAttribute('data-src') || '';
                     addImage(src);
                 }
             } catch(e) {}
+            if (result.images.length > 0) break;
         }
+    }
 
-        // --- Strategy 3: Any large alicdn images on page ---
-        const allImgs = document.querySelectorAll('img[src*="alicdn"], img[data-src*="alicdn"]');
-        for (const img of allImgs) {
-            const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
-            const rect = img.getBoundingClientRect();
-            if (rect.width >= 60 || rect.height >= 60 || src.includes('_50x50') || src.includes('_120x120')) {
-                addImage(src);
+    // --- Strategy 2 (FALLBACK): imagePathList from JSON if DOM gave nothing ---
+    if (result.images.length === 0) {
+        const html = document.documentElement.innerHTML;
+        const imgListPatterns = [
+            /"imagePathList"\\s*:\\s*\\[([^\\]]+)\\]/,
+            /"productImageList"\\s*:\\s*\\[([^\\]]+)\\]/,
+        ];
+        for (const pattern of imgListPatterns) {
+            const match = html.match(pattern);
+            if (match) {
+                const urls = match[1].match(/"((?:https?:|\\/)?\\/\\/[^"]+)"/g);
+                if (urls) {
+                    for (let url of urls) {
+                        url = url.replace(/"/g, '').replace(/\\\\/g, '/');
+                        addImage(url);
+                    }
+                }
+                break;
             }
         }
     }
@@ -1056,18 +1038,34 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 }
                 result.specs = specLines.join(' | ');
 
-                // ---- DESC: find descriptionUrl in JSON, return it for fetching ----
-                // The "description" field is just the SEO meta title — NOT useful.
-                // The real description is at descriptionUrl (external HTML).
+                // ---- DESC: find descriptionUrl + dump all desc-related keys for debugging ----
+                let debugKeys = [];
                 for (const s of scripts) {
                     const t = s.textContent || '';
-                    const m = t.match(/"descriptionUrl"\\s*:\\s*"(https?:[^"]+)"/);
-                    if (m) {
-                        result.descUrl = m[1];
-                        break;
+                    // Find descriptionUrl
+                    const m1 = t.match(/"descriptionUrl"\\s*:\\s*"(https?:[^"]+)"/);
+                    if (m1 && !result.descUrl) {
+                        result.descUrl = m1[1];
+                    }
+                    // Find textDescription
+                    const m2 = t.match(/"textDescription"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/);
+                    if (m2 && m2[1].length > 10) {
+                        debugKeys.push('textDescription(' + m2[1].length + ')=' + m2[1].substring(0, 80));
+                    }
+                    // Find ALL keys containing "desc" to see what's available
+                    const descMatches = t.matchAll(/"([^"]*[Dd]esc[^"]*)"\\s*:/g);
+                    for (const dm of descMatches) {
+                        if (!debugKeys.some(k => k.startsWith(dm[1]))) {
+                            // Get the value preview
+                            const valStart = t.indexOf(dm[0]) + dm[0].length;
+                            const valPreview = t.substring(valStart, valStart + 80).trim();
+                            debugKeys.push(dm[1] + '=' + valPreview);
+                        }
                     }
                 }
-                // Also try textDescription (some pages inline it)
+                result.debugDescKeys = debugKeys.slice(0, 15);
+
+                // Use textDescription if no URL found
                 if (!result.descUrl) {
                     for (const s of scripts) {
                         const t = s.textContent || '';
@@ -1086,6 +1084,11 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             specs_text = specs_and_desc.get("specs", "")
             desc_text = specs_and_desc.get("desc", "")
             desc_url = specs_and_desc.get("descUrl", "")
+            debug_keys = specs_and_desc.get("debugDescKeys", [])
+            if debug_keys:
+                log.info("      DEBUG desc keys: %s", str(debug_keys)[:500])
+            if desc_url:
+                log.info("      DEBUG descUrl: %s", desc_url[:200])
 
             # Fetch actual description from descriptionUrl if available
             if desc_url and not desc_text:
