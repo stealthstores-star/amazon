@@ -1086,49 +1086,98 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 except Exception:
                     pass
 
-            # Strategy 2: Scroll down and extract description from DOM
+            # Strategy 2: Click Description tab + View More, then extract from DOM
             if not desc_text:
-                log.info("      Desc: trying Strategy 2 (scroll + DOM extraction)...")
+                log.info("      Desc: trying Strategy 2 (click Description + View More)...")
                 try:
-                    # Scroll to bottom to trigger lazy-loading of description
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    detail_tab.wait_for_timeout(2000)
+                    # Step 1: Scroll to the description area
+                    detail_tab.evaluate("""
+                    () => {
+                        // Try to find and scroll to description section
+                        const descEl = document.querySelector('[class*="description--wrap"], [class*="description--store"]');
+                        if (descEl) {
+                            descEl.scrollIntoView({block: 'center'});
+                            return 'scrolled to desc element';
+                        }
+                        // Fallback: scroll to ~60% of page
+                        window.scrollTo(0, document.body.scrollHeight * 0.6);
+                        return 'scrolled to 60%';
+                    }
+                    """)
+                    detail_tab.wait_for_timeout(1500)
 
-                    # Try clicking Description tab if it exists
+                    # Step 2: Click the "Description" tab in the navigation
                     try:
-                        clicked = detail_tab.evaluate("""
+                        detail_tab.evaluate("""
                         () => {
-                            const tabs = document.querySelectorAll('[class*="tab"], [role="tab"], [class*="Tab"]');
-                            for (const tab of tabs) {
-                                const text = (tab.innerText || '').trim().toLowerCase();
-                                if (text.includes('description')) {
-                                    tab.click();
-                                    return text;
+                            // Look for Description in tab-like navigation
+                            const candidates = document.querySelectorAll(
+                                '[class*="tab"], [role="tab"], [class*="Tab"], ' +
+                                '[class*="nav"] a, [class*="Nav"] a, [class*="anchor"] a'
+                            );
+                            for (const el of candidates) {
+                                const text = (el.innerText || '').trim().toLowerCase();
+                                if (text === 'description' || text === 'descriptions') {
+                                    el.click();
+                                    return true;
                                 }
                             }
                             return false;
                         }
                         """)
-                        if clicked:
-                            log.info("      Desc: clicked tab '%s'", str(clicked)[:40])
                         detail_tab.wait_for_timeout(1500)
                     except Exception:
                         pass
 
-                    desc_text = detail_tab.evaluate("""
+                    # Step 3: Click "View more" button to expand description
+                    try:
+                        clicked_vm = detail_tab.evaluate("""
+                        () => {
+                            // Find and click "View more" button near description
+                            const buttons = document.querySelectorAll(
+                                'button, [class*="view-more"], [class*="viewMore"], [class*="ViewMore"], ' +
+                                '[class*="expand"], [class*="Expand"], a[class*="more"]'
+                            );
+                            for (const btn of buttons) {
+                                const text = (btn.innerText || '').trim().toLowerCase();
+                                if (text === 'view more' || text === 'show more' || text === 'see more') {
+                                    btn.click();
+                                    return text;
+                                }
+                            }
+                            // Also try generic text matching
+                            const allEls = document.querySelectorAll('span, div, a, button');
+                            for (const el of allEls) {
+                                if (el.children.length > 2) continue;  // skip containers
+                                const text = (el.innerText || '').trim().toLowerCase();
+                                if (text === 'view more') {
+                                    el.click();
+                                    return 'view more (generic)';
+                                }
+                            }
+                            return false;
+                        }
+                        """)
+                        if clicked_vm:
+                            log.info("      Desc: clicked '%s' button", str(clicked_vm)[:40])
+                        detail_tab.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+
+                    # Step 4: Now extract text and images from the loaded description
+                    desc_result = detail_tab.evaluate("""
                     () => {
                         const descSelectors = [
+                            '.product-description',
+                            '.detailmodule_html',
+                            '.detail-desc-decorate-richtext',
                             '#product-description',
                             '[class*="product-description"]',
                             '[class*="ProductDescription"]',
                             '[class*="detail-desc"]',
                             '[class*="DetailDesc"]',
-                            '[class*="description--wrap"]',
                             '[class*="description-content"]',
                             '[class*="desc-content"]',
-                            '.product-detail-tab-content',
-                            '[class*="product-detail"] [class*="content"]',
-                            // Sometimes it's in a module container
                             '[class*="detail-extend"]',
                             '[data-pl="product-description"]',
                         ];
@@ -1137,23 +1186,46 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         for (const sel of descSelectors) {
                             try {
                                 const el = document.querySelector(sel);
-                                if (el) {
-                                    const clone = el.cloneNode(true);
-                                    clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
-                                    let text = clone.innerText.trim();
-                                    // Filter out garbage: just header/button text
-                                    const lower = text.toLowerCase().replace(/[^a-z]/g, '');
-                                    if (lower === 'description' || lower === 'descriptionreportviewmore'
-                                        || lower === 'descriptionviewmore' || lower === 'viewmore'
-                                        || text.length < 50) continue;
-                                    for (const cut of ['additional regulatory', 'regulatory information',
-                                                       'shipping info', 'return policy']) {
-                                        const idx = text.toLowerCase().indexOf(cut);
-                                        if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                if (!el) continue;
+
+                                // Get text content
+                                const clone = el.cloneNode(true);
+                                clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
+                                let text = clone.innerText.trim();
+
+                                // Filter out garbage: just header/button text
+                                const stripped = text.toLowerCase().replace(/[^a-z]/g, '');
+                                if (stripped === 'description' || stripped === 'descriptionreportviewmore'
+                                    || stripped === 'descriptionviewmore' || stripped === 'viewmore'
+                                    || stripped === 'descriptionreport') continue;
+
+                                // Cut at regulatory info
+                                for (const cut of ['additional regulatory', 'regulatory information',
+                                                   'shipping info', 'return policy']) {
+                                    const idx = text.toLowerCase().indexOf(cut);
+                                    if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                }
+
+                                // Get description images (product photos in desc section)
+                                const imgs = [];
+                                el.querySelectorAll('img').forEach(img => {
+                                    const src = img.src || img.getAttribute('data-src') || '';
+                                    if (src && src.includes('alicdn') && !src.includes('icon')
+                                        && !src.includes('logo') && img.naturalWidth > 100) {
+                                        // Get highest quality version
+                                        const cleanSrc = src.replace(/_\d+x\d+.*$/, '').replace(/\.avif$/, '');
+                                        imgs.push(cleanSrc);
                                     }
-                                    if (text.length >= 50) {
-                                        found.push({sel: sel, len: text.length, text: text.substring(0, 3000)});
-                                    }
+                                });
+
+                                if (text.length >= 50 || imgs.length > 0) {
+                                    found.push({
+                                        sel: sel,
+                                        textLen: text.length,
+                                        text: text.length >= 50 ? text.substring(0, 3000) : '',
+                                        imgCount: imgs.length,
+                                        imgs: imgs.slice(0, 10)
+                                    });
                                 }
                             } catch(e) {}
                         }
@@ -1168,30 +1240,39 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     clone.querySelectorAll('img, script, style').forEach(e => e.remove());
                                     let text = clone.innerText.trim();
                                     if (text.length >= 50) {
-                                        found.push({sel: 'iframe', len: text.length, text: text.substring(0, 3000)});
+                                        found.push({sel: 'iframe', textLen: text.length,
+                                            text: text.substring(0, 3000), imgCount: 0, imgs: []});
                                     }
                                 }
                             } catch(e) {}
                         }
 
-                        // Return the longest match (most likely to be real content)
-                        if (found.length > 0) {
-                            found.sort((a, b) => b.len - a.len);
-                            return JSON.stringify({sel: found[0].sel, text: found[0].text, total: found.length});
-                        }
-                        return '';
+                        // Pick the best match: prefer one with text, fall back to most images
+                        if (found.length === 0) return '';
+                        // Sort by text length first, then image count
+                        found.sort((a, b) => (b.textLen || 0) - (a.textLen || 0) || b.imgCount - a.imgCount);
+                        return JSON.stringify(found[0]);
                     }
                     """) or ""
 
-                    if desc_text:
+                    if desc_result:
                         try:
                             import json as _json
-                            parsed = _json.loads(desc_text)
-                            log.info("      Desc Strategy 2: found %d matches, best from '%s' (%d chars)",
-                                     parsed.get("total", 0), parsed.get("sel", "?"), len(parsed.get("text", "")))
+                            parsed = _json.loads(desc_result)
                             desc_text = parsed.get("text", "")
+                            desc_imgs = parsed.get("imgs", [])
+                            log.info("      Desc Strategy 2: selector '%s', %d chars text, %d desc images",
+                                     parsed.get("sel", "?"), len(desc_text), len(desc_imgs))
+                            # Add description images to product images if we don't have enough
+                            if desc_imgs and len(result["all_images"]) < MAX_IMAGES:
+                                for img_url in desc_imgs:
+                                    if img_url not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                        result["all_images"].append(img_url)
+                                if desc_imgs:
+                                    log.info("      Desc: added %d description images (total now: %d)",
+                                             len(desc_imgs), len(result["all_images"]))
                         except Exception:
-                            pass  # If not JSON, keep as-is
+                            pass
                 except Exception as e:
                     log.info("      Description DOM extraction error: %s", str(e)[:120])
 
