@@ -918,11 +918,70 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
 
         # Dismiss any popups
         dismiss_popups(detail_tab)
+        detail_tab.wait_for_timeout(1000)
 
-        # --- STEP 1: Wait a bit longer for page to fully render ---
-        detail_tab.wait_for_timeout(1500)
+        # --- STEP 1: Read price directly using Playwright (most reliable) ---
+        try:
+            result["detail_price"] = detail_tab.evaluate("""
+            () => {
+                // Get ALL text from the page and find price patterns
+                const html = document.documentElement.innerHTML;
 
-        # --- STEP 2: Extract images, title, price, variations, shipping ---
+                // Strategy A: JSON data in script tags (most reliable)
+                const scripts = document.querySelectorAll('script');
+                for (const s of scripts) {
+                    const t = s.textContent || '';
+                    // Try multiple JSON price patterns
+                    const patterns = [
+                        /"formattedActivityPrice"\\s*:\\s*"([^"]+)"/,
+                        /"formattedPrice"\\s*:\\s*"([^"]+)"/,
+                        /"minActivityAmount"\\s*:\\s*{[^}]*"formattedPrice"\\s*:\\s*"([^"]+)"/,
+                        /"salePrice"\\s*:\\s*{[^}]*"formattedPrice"\\s*:\\s*"([^"]+)"/,
+                    ];
+                    for (const pat of patterns) {
+                        const m = t.match(pat);
+                        if (m) return m[1];
+                    }
+                    // Raw number patterns
+                    const numPatterns = [
+                        /"minAmount"\\s*:\\s*{\\s*"value"\\s*:\\s*([\\d.]+)/,
+                        /"discountPrice"\\s*:\\s*{[^}]*"minPrice"\\s*:\\s*([\\d.]+)/,
+                        /"actMinPrice"\\s*:\\s*"?([\\d.]+)/,
+                        /"salePrice"\\s*:\\s*"?([\\d.]+)/,
+                    ];
+                    for (const pat of numPatterns) {
+                        const m = t.match(pat);
+                        if (m) return m[1];
+                    }
+                }
+
+                // Strategy B: Find visible price on page
+                const allEls = document.querySelectorAll('span, div, p, b, strong');
+                for (const el of allEls) {
+                    const t = (el.innerText || '').trim();
+                    if (!t || t.length > 30) continue;
+                    // Match prices like £9.30, $12.50, US $9.30
+                    const m = t.match(/(?:US\\s*)?[£$€]\\s*\\d+[.,]\\d{2}/);
+                    if (m && el.offsetParent !== null) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.top > 50 && rect.top < 600) return m[0];
+                    }
+                }
+
+                // Strategy C: Collect text from price containers
+                const containers = document.querySelectorAll('[class*="price"], [class*="Price"]');
+                for (const c of containers) {
+                    const t = c.innerText.replace(/\\s+/g, '').trim();
+                    const m = t.match(/[£$€]\\d+[.,]\\d{2}/);
+                    if (m) return m[0];
+                }
+                return '';
+            }
+            """)
+        except Exception:
+            pass
+
+        # --- STEP 2: Extract images, title, variations, shipping ---
         data = detail_tab.evaluate(DETAIL_EXTRACT_JS)
 
         if data.get("images"):
@@ -931,112 +990,121 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             result["variations"] = data["variations"]
         if data.get("title"):
             result["detail_title"] = data["title"]
-        if data.get("price"):
+        if not result["detail_price"] and data.get("price"):
             result["detail_price"] = data["price"]
         if data.get("shipping"):
             result["detail_shipping"] = data["shipping"]
         if data.get("description"):
             result["detail_description"] = data["description"]
 
-        # --- STEP 3: If price missing, try reading it from the page directly ---
-        if not result["detail_price"]:
-            try:
-                price_text = detail_tab.evaluate("""
-                () => {
-                    // Try reading price from the page more aggressively
-                    const allEls = document.querySelectorAll('span, div, p');
-                    for (const el of allEls) {
-                        const t = (el.innerText || '').trim();
-                        // Match price patterns: £9.30, $12.50, US $9.30, etc
-                        if (/^(?:US\\s*)?[£$€]\\s*\\d+[.,]\\d{2}$/.test(t) && el.offsetParent !== null) {
-                            // Make sure it's in the price area (top half of page)
-                            const rect = el.getBoundingClientRect();
-                            if (rect.top < window.innerHeight) {
-                                return t;
-                            }
-                        }
-                    }
-                    return '';
-                }
-                """)
-                if price_text:
-                    result["detail_price"] = price_text
-            except Exception:
-                pass
-
         # If few images, scroll a bit and retry
         if len(result["all_images"]) <= 2:
             try:
                 detail_tab.evaluate("window.scrollTo(0, 400)")
-                detail_tab.wait_for_timeout(1000)
+                detail_tab.wait_for_timeout(800)
                 data2 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
                 if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
                     result["all_images"] = data2["images"][:MAX_IMAGES]
-                if not result["detail_price"] and data2.get("price"):
-                    result["detail_price"] = data2["price"]
             except Exception:
                 pass
 
-        # --- STEP 4: Click the Description tab using Playwright locator ---
-        # This is the most reliable way — Playwright matches exact visible text
+        # --- STEP 3: Get description by scrolling down (DO NOT click Description tab) ---
+        # AliExpress Description tab opens a reviews popup — the actual description
+        # is embedded in the page body below the product info section.
         try:
-            desc_tab = None
-            # Try multiple text patterns for the Description tab
-            for tab_text in ["Description", "Descriptions", "Product Description"]:
+            # Scroll down through the page to load the description section
+            detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
+            detail_tab.wait_for_timeout(1000)
+            detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.7)")
+            detail_tab.wait_for_timeout(1000)
+
+            # Close any popup/modal that appeared (reviews popup etc)
+            try:
+                detail_tab.evaluate("""
+                () => {
+                    // Close modals/popups by clicking X buttons or overlay
+                    const closeSels = [
+                        '[class*="modal"] [class*="close"]', '[class*="Modal"] [class*="close"]',
+                        '[class*="popup"] [class*="close"]', '[class*="Popup"] [class*="close"]',
+                        '[class*="overlay"] [class*="close"]',
+                        'button[aria-label="Close"]', '[class*="close-btn"]',
+                        '[class*="dialog"] [class*="close"]',
+                    ];
+                    for (const sel of closeSels) {
+                        const el = document.querySelector(sel);
+                        if (el && el.offsetParent !== null) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                """)
+            except Exception:
+                pass
+
+            # Re-extract — description section may now be loaded in the DOM
+            data3 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
+            if data3.get("description") and len(data3.get("description", "")) > len(result["detail_description"]):
+                result["detail_description"] = data3["description"]
+
+            # If still no description, try extracting from the page's embedded HTML content
+            if not result["detail_description"] or len(result["detail_description"]) < 50:
                 try:
-                    loc = detail_tab.get_by_role("tab", name=tab_text)
-                    if loc.count() > 0 and loc.first.is_visible():
-                        desc_tab = loc.first
-                        break
+                    desc_text = detail_tab.evaluate("""
+                    () => {
+                        // Look for description in iframes (AliExpress often puts it in an iframe)
+                        const iframes = document.querySelectorAll('iframe');
+                        for (const iframe of iframes) {
+                            try {
+                                const doc = iframe.contentDocument || iframe.contentWindow.document;
+                                if (doc && doc.body) {
+                                    const t = doc.body.innerText.trim();
+                                    if (t.length > 50) return t.substring(0, 2000);
+                                }
+                            } catch(e) {} // cross-origin will fail, that's fine
+                        }
+
+                        // Look for the description section by common patterns
+                        const descSels = [
+                            '[class*="product-description"] [class*="content"]',
+                            '[class*="description-content"]',
+                            '[class*="detail-desc"]', '[id*="product-description"]',
+                            '[class*="product-detail-info"]',
+                            '[data-pl="product-description"]',
+                            '[class*="ProductDescription"]',
+                        ];
+                        for (const sel of descSels) {
+                            const el = document.querySelector(sel);
+                            if (el) {
+                                const t = el.innerText.trim();
+                                if (t.length > 50) return t.substring(0, 2000);
+                            }
+                        }
+
+                        // Look for large text blocks below the product info
+                        const allDivs = document.querySelectorAll('div');
+                        for (const div of allDivs) {
+                            const t = div.innerText.trim();
+                            const rect = div.getBoundingClientRect();
+                            // Must be below the fold and have substantial text
+                            if (t.length > 100 && t.length < 3000 && rect.top > 500) {
+                                // Skip if it looks like reviews
+                                const lower = t.toLowerCase();
+                                if (lower.includes('verified purchase') || lower.includes('ratings')
+                                    || lower.includes('helpful (') || lower.includes('all ratings')) continue;
+                                return t.substring(0, 2000);
+                            }
+                        }
+                        return '';
+                    }
+                    """)
+                    if desc_text and len(desc_text) > len(result["detail_description"]):
+                        result["detail_description"] = desc_text
                 except Exception:
                     pass
-
-            # Fallback: try Playwright's get_by_text for exact "Description"
-            if not desc_tab:
-                try:
-                    loc = detail_tab.get_by_text("Description", exact=True)
-                    if loc.count() > 0:
-                        for i in range(min(loc.count(), 5)):
-                            el = loc.nth(i)
-                            try:
-                                text = el.inner_text().strip()
-                                if len(text) < 25 and el.is_visible():
-                                    desc_tab = el
-                                    break
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            if desc_tab:
-                desc_tab.scroll_into_view_if_needed()
-                detail_tab.wait_for_timeout(300)
-                desc_tab.click()
-                log.info("      Clicked Description tab")
-                detail_tab.wait_for_timeout(2000)
-
-                # Click "Show more" if present
-                try:
-                    for show_text in ["Show more", "View more", "Read more"]:
-                        try:
-                            btn = detail_tab.get_by_text(show_text, exact=True)
-                            if btn.count() > 0 and btn.first.is_visible():
-                                btn.first.click()
-                                detail_tab.wait_for_timeout(800)
-                                break
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                # Re-extract to get description content
-                data3 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
-                if data3.get("description") and len(data3.get("description", "")) > len(result["detail_description"]):
-                    result["detail_description"] = data3["description"]
-            else:
-                log.debug("      Description tab not found on page")
         except Exception as e:
-            log.debug("      Description tab error: %s", str(e)[:80])
+            log.debug("      Description extraction error: %s", str(e)[:80])
 
     except Exception as e:
         log.debug("  Detail scrape failed for %s: %s", product_id, str(e)[:80])
