@@ -391,12 +391,37 @@ EXTRACT_JS = """
 
         let price = 'N/A';
         const cardText = card.innerText || '';
-        const pm = cardText.match(/(?:US\\s*)?[\\$€£¥₽]\\s*[\\d,]+\\.?\\d*/);
-        if (pm) {
-            price = pm[0].trim();
-        } else {
-            const pm2 = cardText.match(/\\d+[,.]\\d{2}/);
-            if (pm2) price = '$' + pm2[0];
+        // Strategy 1: Look for price in dedicated DOM elements first
+        const priceSelectors = [
+            '[class*="price-current"]', '[class*="price--current"]',
+            '[class*="sale-price"]', '[class*="salePrice"]',
+            '[class*="Price"] [class*="current"]',
+            '[class*="multi--price"]', '[class*="price-sale"]',
+            '[class*="snow-price_SnowPrice"]',
+            '[class*="price"]'
+        ];
+        for (const sel of priceSelectors) {
+            try {
+                const el = card.querySelector(sel);
+                if (el) {
+                    const pText = el.innerText.trim();
+                    const pMatch = pText.match(/(?:US\\s*)?[\\$€£¥₽]\\s*[\\d,]+\\.\\d{1,2}/);
+                    if (pMatch) { price = pMatch[0].trim(); break; }
+                    // Prices like "9.30" without currency symbol
+                    const pMatch2 = pText.match(/\\d+[,.]\\d{2}/);
+                    if (pMatch2) { price = '$' + pMatch2[0]; break; }
+                }
+            } catch(e) {}
+        }
+        // Strategy 2: Regex on full card text (original approach)
+        if (price === 'N/A') {
+            const pm = cardText.match(/(?:US\\s*)?[\\$€£¥₽]\\s*[\\d,]+\\.?\\d*/);
+            if (pm) {
+                price = pm[0].trim();
+            } else {
+                const pm2 = cardText.match(/\\d+[,.]\\d{2}/);
+                if (pm2) price = '$' + pm2[0];
+            }
         }
 
         let sales = '';
@@ -618,12 +643,43 @@ DETAIL_EXTRACT_JS = """
     );
     if (titleEl) result.title = titleEl.innerText.trim();
 
-    // Get price
-    const priceEl = document.querySelector(
-        '[class*="product-price-current"], [class*="uniform-banner-box-price"], ' +
-        '[class*="price--current"], .product-price-value'
-    );
-    if (priceEl) result.price = priceEl.innerText.trim();
+    // Get price — try multiple selectors (AliExpress changes class names frequently)
+    const priceSels = [
+        '[class*="product-price-current"]', '[class*="uniform-banner-box-price"]',
+        '[class*="price--current"]', '.product-price-value',
+        '[class*="snow-price_SnowPrice"]', '[class*="price-current"]',
+        '[class*="sale-price"]', '[class*="salePrice"]',
+        '[class*="multi--price"]', '[class*="price-sale"]',
+        '[class*="es--wrap"] [class*="price"]',
+        '[data-pl="product-price"]',
+    ];
+    for (const sel of priceSels) {
+        try {
+            const el = document.querySelector(sel);
+            if (el) {
+                const pText = el.innerText.trim();
+                if (pText && /[\d]/.test(pText)) {
+                    result.price = pText;
+                    break;
+                }
+            }
+        } catch(e) {}
+    }
+    // Fallback: extract price from page scripts/JSON data
+    if (!result.price) {
+        try {
+            const scripts = document.querySelectorAll('script');
+            for (const s of scripts) {
+                const t = s.textContent || '';
+                const priceMatch = t.match(/"formattedActivityPrice"\s*:\s*"([^"]+)"/);
+                if (priceMatch) { result.price = priceMatch[1]; break; }
+                const priceMatch2 = t.match(/"minAmount"\s*:\s*{\s*"value"\s*:\s*([\d.]+)/);
+                if (priceMatch2) { result.price = '$' + priceMatch2[1]; break; }
+                const priceMatch3 = t.match(/"discountPrice"\s*:\s*{\s*"minPrice"\s*:\s*([\d.]+)/);
+                if (priceMatch3) { result.price = '$' + priceMatch3[1]; break; }
+            }
+        } catch(e) {}
+    }
 
     return result;
 }
@@ -3047,6 +3103,9 @@ def main():
                                 product["variations"] = json.dumps(detail["variations"])
                             if detail["detail_title"] and len(detail["detail_title"]) > len(product.get("product_title", "")):
                                 product["product_title"] = detail["detail_title"]
+                            # Fill in price from detail page when search page had N/A
+                            if detail.get("detail_price") and (not product.get("product_price") or product["product_price"] == "N/A"):
+                                product["product_price"] = detail["detail_price"]
 
                 prev_total = csv_out.count
                 csv_out.add(products, url)
