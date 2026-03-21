@@ -55,7 +55,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
-PARALLEL_TABS = 3               # Parallel detail tabs — speeds up detail scraping 3x
+PARALLEL_TABS = 2               # Parallel detail tabs — 2 is safer to avoid CAPTCHAs
 
 # Proxy pool disabled — cheap datacenter proxies trigger more CAPTCHAs than
 # browsing direct from a residential IP.  Keep the list empty so proxy code
@@ -882,23 +882,67 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         # Dismiss any popups
         dismiss_popups(detail_tab)
 
-        # Click "Show more" / "View more" on description if present
+        # Scroll down to the description/tabs section and click "Description" tab
         try:
-            show_more_sels = [
-                'button:has-text("Show more")', 'button:has-text("View more")',
-                'a:has-text("Show more")', 'a:has-text("View more")',
-                '[class*="description"] [class*="more"]',
-                '[class*="expand"]', '[class*="show-more"]', '[class*="view-more"]',
-            ]
-            for sel in show_more_sels:
-                try:
-                    btn = detail_tab.query_selector(sel)
-                    if btn and btn.is_visible():
-                        btn.click()
-                        detail_tab.wait_for_timeout(500)
-                        break
-                except Exception:
-                    pass
+            detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.4)")
+            detail_tab.wait_for_timeout(500)
+        except Exception:
+            pass
+        # Click "Description" tab — AliExpress shows reviews by default
+        try:
+            desc_clicked = detail_tab.evaluate("""
+            () => {
+                // Find tab navigation items
+                const tabSels = [
+                    '[class*="tab"] a', '[class*="tab"] span', '[class*="tab"] div',
+                    '[class*="Tab"] a', '[class*="Tab"] span',
+                    '[role="tab"]', '[class*="nav-item"]',
+                    'div[class*="product-detail"] a',
+                ];
+                for (const sel of tabSels) {
+                    const tabs = document.querySelectorAll(sel);
+                    for (const tab of tabs) {
+                        const text = (tab.innerText || tab.textContent || '').trim().toLowerCase();
+                        if (text === 'description' || text === 'descriptions'
+                            || text === 'product description') {
+                            tab.scrollIntoView({block: 'center'});
+                            tab.click();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            """)
+            if desc_clicked:
+                detail_tab.wait_for_timeout(1000)
+        except Exception:
+            pass
+
+        # Click "Show more" / "View more" to expand truncated description
+        try:
+            detail_tab.evaluate("""
+            () => {
+                const btns = document.querySelectorAll(
+                    '[class*="show-more"], [class*="view-more"], [class*="showMore"], [class*="viewMore"]'
+                );
+                for (const btn of btns) {
+                    if (btn.offsetParent !== null) { btn.click(); return true; }
+                }
+                // Also try text-based matching
+                const allBtns = document.querySelectorAll('button, a, span[role="button"]');
+                for (const btn of allBtns) {
+                    const t = (btn.innerText || '').trim().toLowerCase();
+                    if ((t === 'show more' || t === 'view more' || t === 'read more')
+                        && btn.offsetParent !== null) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """)
+            detail_tab.wait_for_timeout(500)
         except Exception:
             pass
 
@@ -917,12 +961,26 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         if data.get("description"):
             result["detail_description"] = data["description"]
 
-        # If we only got 1 image or no description, scroll down and re-extract
+        # If we only got 1 image or no description, scroll further and retry
         if len(result["all_images"]) <= 1 or not result["detail_description"]:
             try:
-                # Scroll further — descriptions and specs are below the fold
-                detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
-                detail_tab.wait_for_timeout(800)
+                detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
+                detail_tab.wait_for_timeout(1000)
+                # Try clicking description tab again in case first attempt failed
+                try:
+                    detail_tab.evaluate("""
+                    () => {
+                        const tabs = document.querySelectorAll('[class*="tab"] a, [class*="tab"] span, [role="tab"], [class*="Tab"] span');
+                        for (const tab of tabs) {
+                            const t = (tab.innerText || '').trim().toLowerCase();
+                            if (t === 'description' || t === 'descriptions') { tab.click(); return true; }
+                        }
+                        return false;
+                    }
+                    """)
+                    detail_tab.wait_for_timeout(800)
+                except Exception:
+                    pass
                 data2 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
                 if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
                     result["all_images"] = data2["images"][:MAX_IMAGES]
@@ -1013,7 +1071,7 @@ def scrape_details_parallel(context, products, main_tab):
                     tabs[i].goto(product["product_url"], wait_until="commit", timeout=10000)
                 except Exception:
                     pass
-            time.sleep(random.uniform(1.5, 3.0))
+            time.sleep(random.uniform(2.5, 4.5))
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -1485,17 +1543,17 @@ def scroll_and_extract(tab):
         pass
     products = extract(tab)
     stale = 0
-    max_stale = 5  # Reduced from 8 — stop sooner when no new products appear
+    max_stale = 6
     while stale < max_stale:
         try:
             # Scroll to bottom, wait, then scroll up slightly and back down
             # to trigger lazy-load observers that need scroll direction changes
             tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            tab.wait_for_timeout(800)
+            tab.wait_for_timeout(1200)
             tab.evaluate("window.scrollBy(0, -500)")
-            tab.wait_for_timeout(300)
+            tab.wait_for_timeout(500)
             tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            tab.wait_for_timeout(800)
+            tab.wait_for_timeout(1200)
         except Exception:
             break
         new = extract(tab)
@@ -3411,7 +3469,7 @@ def main():
                                 pid = product["id"]
                                 product_url = product["product_url"]
                                 if p_idx > 0:
-                                    time.sleep(random.uniform(1.5, 3.0))
+                                    time.sleep(random.uniform(2.5, 4.5))
                                 log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
                                 handle_captcha(tab)
                                 detail_results.append(scrape_product_detail(detail_tab, product_url, pid, context=context, main_tab=tab))
@@ -3486,7 +3544,7 @@ def main():
                 clicked = click_next(tab, pg - 1)
                 if clicked:
                     log.info("    Clicked pagination button for page %d", pg)
-                    tab.wait_for_timeout(1500)
+                    tab.wait_for_timeout(2500)
                     # Wait for new content to load
                     try:
                         tab.wait_for_selector("a[href*='/item/']", timeout=8000)
@@ -3506,7 +3564,7 @@ def main():
                         log.info("  Could not reach page %d — done.", pg)
                         break
 
-                time.sleep(random.uniform(1.5, 3.0))
+                time.sleep(random.uniform(2.5, 4.5))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
