@@ -1546,7 +1546,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             # Capture: desc-related URLs OR any JSON/HTML response (could be description)
                             is_desc_url = any(k in ul for k in ["desc", "description", "detail-desc",
                                     "moduleanalysis", "item/detail", "richtext", "item-description",
-                                    "module/analysis", "product/detail"])
+                                    "module/analysis", "product/detail", "aeproductsourcesite"])
                             is_content = ("json" in ct or "html" in ct) and response.status == 200
                             # Skip tracking/analytics/images
                             is_noise = any(k in ul for k in ["goldlog", "beacon", "tracker", "analytics",
@@ -1559,13 +1559,33 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             pass
                     detail_tab.on("response", _on_response)
 
-                    # Scroll to bottom to trigger lazy loading
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    detail_tab.wait_for_timeout(800)
+                    # STEP 1: Click the "Description" tab to make description section visible
+                    try:
+                        detail_tab.evaluate("""
+                        () => {
+                            const tabs = document.querySelectorAll('span, div, a, button, li');
+                            for (const tab of tabs) {
+                                const t = (tab.innerText || '').trim();
+                                if (t === 'Description' && tab.offsetWidth > 0) {
+                                    tab.scrollIntoView({block: 'center'});
+                                    tab.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        """)
+                    except Exception:
+                        pass
+                    detail_tab.wait_for_timeout(1000)
+
+                    # STEP 2: Scroll to description area
+                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
+                    detail_tab.wait_for_timeout(500)
                     detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     detail_tab.wait_for_timeout(500)
 
-                    # Click the description "View more"
+                    # STEP 3: Click "View more" to expand description
                     try:
                         clicked_vm = detail_tab.evaluate("""
                         () => {
@@ -1617,8 +1637,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Wait for content to appear (network fetch or CSS toggle)
-                    detail_tab.wait_for_timeout(2000)
+                    # Wait for iframe to load (description is in an iframe from aeproductsourcesite)
+                    detail_tab.wait_for_timeout(3000)
 
                     # Extract description from page text — works for ALL AliExpress stores
                     # The page always has: Description\nreport\n[content]\nAdditional regulatory
@@ -1831,8 +1851,10 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         except Exception:
                             pass
 
-                    # If no network capture worked, try ALL frames (skip wp.html and JS frames)
+                    # If no network capture worked, try ALL frames (desc is often in an iframe)
                     if not desc_text:
+                        frame_urls = [(f.url or "")[:80] for f in detail_tab.frames if f != detail_tab.main_frame]
+                        log.info("      Desc: checking %d frames: %s", len(frame_urls), str(frame_urls)[:300])
                         for frame in detail_tab.frames:
                             if frame == detail_tab.main_frame:
                                 continue
