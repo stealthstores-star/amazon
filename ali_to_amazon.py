@@ -2095,17 +2095,27 @@ def _upload_to_imgur(jpeg_bytes):
     return None
 
 
+_freeimage_lock = _threading.Lock()
+_freeimage_last_call = 0.0
+
 def _upload_to_freeimage(jpeg_bytes):
     """Upload JPEG bytes to freeimage.host (iili.io CDN). Returns direct URL or None."""
+    global _freeimage_last_call
     FREEIMAGE_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
     try:
         import base64
         b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
-        resp = http_requests.post(
-            "https://freeimage.host/api/1/upload",
-            data={"key": FREEIMAGE_API_KEY, "source": b64, "format": "json"},
-            timeout=30,
-        )
+        # Throttle: at most 1 request per second to avoid rate limits
+        with _freeimage_lock:
+            elapsed = time.time() - _freeimage_last_call
+            if elapsed < 1.0:
+                time.sleep(1.0 - elapsed)
+            resp = http_requests.post(
+                "https://freeimage.host/api/1/upload",
+                data={"key": FREEIMAGE_API_KEY, "source": b64, "format": "json"},
+                timeout=30,
+            )
+            _freeimage_last_call = time.time()
         if resp.status_code == 200:
             data = resp.json()
             url = data.get("image", {}).get("url", "")
@@ -2190,25 +2200,24 @@ def rehost_image(img_url):
     _save_image_locally(jpeg_bytes, img_url)
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
-    # Try imgbb first (reliable, Amazon-accessible, full-size URLs)
-    # Serialize imgbb requests with a lock to avoid concurrent rate limits
-    if not _imgbb_skip:
-        with _imgbb_lock:
-            result = _upload_to_imgbb_with_retry(jpeg_bytes)
-            if result:
-                log.info(f"          [IMG] imgbb: {result}")
-                return result
-
-    # Try freeimage.host as fallback
-    if getattr(rehost_image, '_freeimage_fails', 0) < 5:
+    # Try freeimage.host first (best rate limits for bulk uploads)
+    if getattr(rehost_image, '_freeimage_fails', 0) < 10:
         hosted_url = _upload_to_freeimage(jpeg_bytes)
         if hosted_url and _verify_hosted_image(hosted_url):
             log.info(f"          [IMG] freeimage (iili.io): {hosted_url}")
             rehost_image._freeimage_fails = 0
             return hosted_url
         rehost_image._freeimage_fails = getattr(rehost_image, '_freeimage_fails', 0) + 1
-        if rehost_image._freeimage_fails >= 5:
+        if rehost_image._freeimage_fails >= 10:
             log.warning("          [IMG] freeimage rate-limited — skipping for remaining images")
+
+    # Try imgbb (serialize to avoid concurrent rate limits)
+    if not _imgbb_skip:
+        with _imgbb_lock:
+            result = _upload_to_imgbb_with_retry(jpeg_bytes)
+            if result:
+                log.info(f"          [IMG] imgbb: {result}")
+                return result
 
     # Try Imgur as fallback
     if getattr(rehost_image, '_imgur_fails', 0) < 5:
