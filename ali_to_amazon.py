@@ -2701,15 +2701,18 @@ def _extract_specs_from_ali_desc(ali_desc):
 
 
 def make_description(title, ali_description=None):
-    """Generate a clean, accurate Amazon product description.
+    """Generate a clean, professional Amazon product description.
 
-    Prioritises real information from the AliExpress listing. Only adds
-    generic filler when no AliExpress description was scraped.
-    Never makes claims that aren't supported by the title or listing.
+    Builds a well-formatted description from:
+    1. The product title (cleaned)
+    2. AliExpress specs (key-value pairs from listing)
+    3. AliExpress description text (feature sentences)
+    4. Title-derived info (scale, material, piece count)
     """
     clean = clean_title(title)
     text = title.lower()
     scale = _detect_scale(title)
+    theme = _detect_theme(title)
     material = _detect_material(title)
     num = _detect_num_pieces(title)
 
@@ -2719,55 +2722,84 @@ def make_description(title, ali_description=None):
 
     sections = []
 
-    # --- Section 1: Product title as the opener ---
-    sections.append(clean + ".")
+    # --- Section 1: Opening paragraph — product summary ---
+    opener_parts = [clean]
+    # Build a natural opening sentence with key attributes
+    attrs = []
+    mat = ali_specs.get("Material", material)
+    if mat:
+        attrs.append(f"crafted from {mat.lower()}")
+    if scale:
+        attrs.append(f"in {scale} scale")
+    if num > 1:
+        attrs.append(f"featuring {num} pieces")
+    if attrs:
+        opener_parts.append(" — " + ", ".join(attrs) + ".")
+    else:
+        opener_parts.append(".")
 
-    # --- Section 2: Key specifications ---
-    # Prioritise specs from the actual listing, fill gaps from title only
-    spec_items = []
-    # Add AliExpress specs first (these are from the real listing)
-    for label, val in ali_specs.items():
-        spec_items.append(f"{label}: {val}")
-    # Only add title-detected specs if the listing didn't provide them
-    if material and "Material" not in ali_specs:
-        spec_items.append(f"Material: {material}")
-    if scale and "Scale" not in ali_specs:
-        spec_items.append(f"Scale: {scale}")
-    if num > 1 and "Pieces" not in ali_specs:
-        spec_items.append(f"Pieces: {num}")
-    if spec_items:
-        sections.append("Specifications: " + " // ".join(spec_items[:10]))
+    # Add a theme-appropriate second sentence
+    theme_lines = {
+        "Military": "A detailed figure capturing authentic military character and equipment.",
+        "Aviation": "A finely sculpted figure capturing the spirit of aviation history.",
+        "Fantasy": "A striking fantasy figure with intricate sculpted detail throughout.",
+        "Science Fiction": "A dynamic sci-fi figure with futuristic detail and design.",
+        "Historical": "A carefully researched figure reflecting historical accuracy and period detail.",
+        "Anime": "A detailed collectible figure with dynamic posing and sharp sculpted features.",
+        "Diorama": "An ideal piece for building immersive miniature scenes and displays.",
+        "Decorative": "A beautifully detailed piece suitable for display and home decoration.",
+    }
+    theme_line = theme_lines.get(theme, "A high-quality collectible figure with excellent sculpted detail.")
+    opener_parts.append(" " + theme_line)
+    sections.append("".join(opener_parts))
 
-    # --- Section 3: Product features from the actual listing ---
+    # --- Section 2: Product features from the actual listing ---
     if ali_features:
         clean_features = []
         for feat in ali_features[:5]:
             feat = feat.strip()
-            if feat:
-                feat = feat[0].upper() + feat[1:]
-                if not feat.endswith('.'):
-                    feat += '.'
-                clean_features.append(feat)
+            if not feat:
+                continue
+            feat = feat[0].upper() + feat[1:]
+            if not feat.endswith('.'):
+                feat += '.'
+            clean_features.append(feat)
         if clean_features:
-            sections.append(" ".join(clean_features))
+            sections.append("\n".join(clean_features))
 
-    # --- Section 4: Kit info (only state what the title confirms) ---
+    # --- Section 3: Specifications table ---
+    spec_items = []
+    # Add AliExpress specs first (from the real listing)
+    for label, val in ali_specs.items():
+        if label == "Material":
+            continue  # already used in opener
+        spec_items.append(f"  {label}: {val}")
+    # Fill in from title if listing didn't provide them
+    if scale and "Scale" not in ali_specs:
+        spec_items.append(f"  Scale: {scale}")
+    if material and "Material" not in ali_specs:
+        spec_items.append(f"  Material: {material}")
+    if num > 1 and "Pieces" not in ali_specs:
+        spec_items.append(f"  Pieces: {num}")
+    if spec_items:
+        sections.append("Specifications:\n" + "\n".join(spec_items[:10]))
+
+    # --- Section 4: Kit / assembly info ---
     kit_info = []
     if "unpainted" in text and "unassembled" in text:
-        kit_info.append("This kit is supplied unassembled and unpainted.")
+        kit_info.append("Supplied unassembled and unpainted — a rewarding project for experienced modellers.")
     elif "unpainted" in text:
-        kit_info.append("This kit is supplied unpainted.")
+        kit_info.append("Supplied unpainted, allowing full creative freedom with your choice of colours.")
     elif "unassembled" in text:
-        kit_info.append("This kit requires assembly.")
-    if num > 1:
-        kit_info.append(f"This set contains {num} pieces.")
+        kit_info.append("Supplied unassembled — some modelling experience recommended.")
+    if num > 1 and not any("pieces" in k.lower() for k in ali_specs):
+        kit_info.append(f"This set includes {num} individual pieces.")
     if kit_info:
         sections.append(" ".join(kit_info))
 
-    # --- Section 5: Short closing ---
-    # Only if we have very little content, add a brief generic line
+    # --- Section 5: Closing ---
     if not has_ali_data:
-        sections.append("Please see the product images for full detail on what is included.")
+        sections.append("Please refer to the product images for full detail on what is included.")
 
     return "\n\n".join(sections)
 
