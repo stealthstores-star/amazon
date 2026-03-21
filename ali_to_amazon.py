@@ -1485,15 +1485,25 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 log.info("      Desc: trying Strategy 4 (network intercept + View More)...")
                 try:
                     # Set up network request capture BEFORE clicking View More
+                    # Capture ALL JSON/HTML responses — some stores use URLs without "desc" keyword
                     captured_urls = []
                     def _on_response(response):
                         try:
                             url = response.url
-                            # Capture description-related responses
-                            if any(k in url.lower() for k in ["desc", "description", "detail-desc",
-                                    "moduleanalysis", "item/detail", "richtext", "item-description"]):
-                                ct = response.headers.get("content-type", "")
-                                captured_urls.append({"url": url, "status": response.status, "ct": ct})
+                            ct = response.headers.get("content-type", "") or ""
+                            ul = url.lower()
+                            # Capture: desc-related URLs OR any JSON/HTML response (could be description)
+                            is_desc_url = any(k in ul for k in ["desc", "description", "detail-desc",
+                                    "moduleanalysis", "item/detail", "richtext", "item-description",
+                                    "module/analysis", "product/detail"])
+                            is_content = ("json" in ct or "html" in ct) and response.status == 200
+                            # Skip tracking/analytics/images
+                            is_noise = any(k in ul for k in ["goldlog", "beacon", "tracker", "analytics",
+                                    ".png", ".jpg", ".gif", ".webp", ".css", ".js", "google", "facebook",
+                                    "lazada", "aplus", "retcode", "arms", "wpk."])
+                            if is_desc_url or (is_content and not is_noise):
+                                captured_urls.append({"url": url, "status": response.status, "ct": ct,
+                                                      "is_desc": is_desc_url})
                         except Exception:
                             pass
                     detail_tab.on("response", _on_response)
@@ -1556,8 +1566,121 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Wait for network requests triggered by the click
+                    # Wait for content to appear (network fetch or CSS toggle)
                     detail_tab.wait_for_timeout(2000)
+
+                    # IMMEDIATE DOM scan after View More click — catches CSS-toggled content
+                    # that was hidden and is now visible (no network request needed)
+                    if not desc_text:
+                        try:
+                            vm_result = detail_tab.evaluate("""
+                            () => {
+                                // After View More click, look for any large visible text block
+                                // that looks like a product description
+                                // Try known description containers first
+                                const sels = [
+                                    '[class*="product-description"]', '[class*="detail-desc"]',
+                                    '[class*="description--"]', '[class*="ItemDescription"]',
+                                    '[class*="desc-content"]', '[class*="desc_rich"]',
+                                    '[class*="richtext"]', '[class*="detail-content"]',
+                                    '.product-description', '.detailmodule_html',
+                                    '#product-description', '[data-pl="product-description"]',
+                                    'div[data-spm="description"]',
+                                    // Newer AliExpress patterns
+                                    '[class*="expand"]', '[class*="toggle-content"]',
+                                    '[class*="collapse"][class*="show"]',
+                                    '[class*="description"][class*="content"]',
+                                ];
+                                for (const sel of sels) {
+                                    try {
+                                        const els = document.querySelectorAll(sel);
+                                        for (const el of els) {
+                                            if (!el) continue;
+                                            // Skip invisible elements
+                                            const style = window.getComputedStyle(el);
+                                            if (style.display === 'none' || style.visibility === 'hidden') continue;
+                                            // Check for substantial content
+                                            const clone = el.cloneNode(true);
+                                            // Get first description image before removing
+                                            let firstImg = '';
+                                            el.querySelectorAll('img').forEach(img => {
+                                                if (firstImg) return;
+                                                const src = img.src || img.getAttribute('data-src') || '';
+                                                if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                                    && !src.includes('icon') && !src.includes('logo')
+                                                    && !src.includes('thumbnail')) firstImg = src;
+                                            });
+                                            clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
+                                            let text = clone.innerText.trim();
+                                            // Skip placeholder text
+                                            const stripped = text.toLowerCase().replace(/[^a-z]/g, '');
+                                            if (['description','descriptionreportviewmore','descriptionviewmore',
+                                                 'viewmore','descriptionreport','showmore','seemore'].includes(stripped)) continue;
+                                            // Cut at regulatory section
+                                            for (const cut of ['additional regulatory', 'regulatory information',
+                                                               'shipping info', 'return policy']) {
+                                                const idx = text.toLowerCase().indexOf(cut);
+                                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                            }
+                                            if (text.length >= 50 || firstImg)
+                                                return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                        }
+                                    } catch(e) {}
+                                }
+                                // Broader fallback: find ANY large visible text block near the View More area
+                                // Walk the DOM looking for containers with substantial text
+                                const allDivs = document.querySelectorAll('div, section, article');
+                                for (const div of allDivs) {
+                                    try {
+                                        const style = window.getComputedStyle(div);
+                                        if (style.display === 'none' || style.visibility === 'hidden') continue;
+                                        // Only check leaf-ish containers (not too many children)
+                                        if (div.children.length > 50) continue;
+                                        const html = div.innerHTML;
+                                        // Must have substantial HTML with images or formatted text
+                                        if (html.length < 200) continue;
+                                        // Must contain img tags with alicdn sources — description sections have product images
+                                        const hasDescImg = /<img[^>]+(?:alicdn|ae01|ae04)[^>]+>/i.test(html);
+                                        if (!hasDescImg) continue;
+                                        let firstImg = '';
+                                        div.querySelectorAll('img').forEach(img => {
+                                            if (firstImg) return;
+                                            const src = img.src || img.getAttribute('data-src') || '';
+                                            if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
+                                                && !src.includes('icon') && !src.includes('logo')
+                                                && !src.includes('thumbnail') && !src.includes('avatar')) firstImg = src;
+                                        });
+                                        const clone = div.cloneNode(true);
+                                        clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
+                                        let text = clone.innerText.trim();
+                                        // Must be a real description, not navigation or headers
+                                        if (text.length >= 100 || firstImg) {
+                                            for (const cut of ['additional regulatory', 'regulatory information']) {
+                                                const idx = text.toLowerCase().indexOf(cut);
+                                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                            }
+                                            return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                        }
+                                    } catch(e) {}
+                                }
+                                return '';
+                            }
+                            """) or ""
+                            if vm_result:
+                                import json as _json_vm
+                                parsed_vm = _json_vm.loads(vm_result)
+                                t = parsed_vm.get("text", "")
+                                img = parsed_vm.get("img", "")
+                                if t and len(t) >= 50 and not t.startswith("Buy "):
+                                    desc_text = t
+                                    log.info("      Desc: got %d chars from DOM after View More click", len(desc_text))
+                                    if not _store_desc_strategy:
+                                        _store_desc_strategy = "s4dom"
+                                if img and img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                    result["all_images"].append(img)
+                                    log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                        except Exception:
+                            pass
 
                     # Remove listener
                     try:
@@ -1565,11 +1688,12 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Log captured URLs and cache moduleanalysis URL
+                    # Sort captured URLs: desc-related first, then others
                     if captured_urls:
-                        for cu in captured_urls[:5]:
-                            log.info("      Desc captured: %s (status=%s, ct=%s)",
-                                     cu["url"][:120], cu["status"], cu["ct"][:40])
+                        captured_urls.sort(key=lambda x: (0 if x.get("is_desc") else 1))
+                        for cu in captured_urls[:8]:
+                            log.info("      Desc captured: %s (status=%s, ct=%s, desc=%s)",
+                                     cu["url"][:120], cu["status"], cu["ct"][:40], cu.get("is_desc"))
                             # Cache moduleanalysis URL for reuse across products
                             if "moduleanalysis" in cu["url"] and int(cu["status"]) == 200:
                                 _cached_moduleanalysis_url = cu["url"]
