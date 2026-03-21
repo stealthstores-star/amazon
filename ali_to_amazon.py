@@ -2107,17 +2107,11 @@ def _upload_to_freeimage(jpeg_bytes):
     try:
         import base64
         b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
-        # Throttle: at most 1 request per second to avoid rate limits
-        with _freeimage_lock:
-            elapsed = time.time() - _freeimage_last_call
-            if elapsed < 1.0:
-                time.sleep(1.0 - elapsed)
-            resp = http_requests.post(
-                "https://freeimage.host/api/1/upload",
-                data={"key": FREEIMAGE_API_KEY, "source": b64, "format": "json"},
-                timeout=30,
-            )
-            _freeimage_last_call = time.time()
+        resp = http_requests.post(
+            "https://freeimage.host/api/1/upload",
+            data={"key": FREEIMAGE_API_KEY, "source": b64, "format": "json"},
+            timeout=30,
+        )
         if resp.status_code == 200:
             data = resp.json()
             url = data.get("image", {}).get("url", "")
@@ -3433,12 +3427,12 @@ def post_process(csv_path):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-    log.info("  %d images to rehost across %d products (parallel, 3 workers)...",
+    log.info("  %d images to rehost across %d products (parallel, 20 workers)...",
              len(upload_tasks), len(product_rows))
 
     # Run uploads in parallel
     results = {}  # task_index -> new_url
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=20) as pool:
         future_map = {pool.submit(rehost_image, task[3]): i for i, task in enumerate(upload_tasks)}
         for future in as_completed(future_map):
             idx = future_map[future]
