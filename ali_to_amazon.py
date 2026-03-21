@@ -920,82 +920,74 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         dismiss_popups(detail_tab)
         detail_tab.wait_for_timeout(1000)
 
-        # --- STEP 1: Read price directly using Playwright (most reliable) ---
-        try:
-            result["detail_price"] = detail_tab.evaluate("""
-            () => {
-                // Get ALL text from the page and find price patterns
-                const html = document.documentElement.innerHTML;
-
-                // Strategy A: JSON data in script tags (most reliable)
-                const scripts = document.querySelectorAll('script');
-                for (const s of scripts) {
-                    const t = s.textContent || '';
-                    // Try multiple JSON price patterns
-                    const patterns = [
-                        /"formattedActivityPrice"\\s*:\\s*"([^"]+)"/,
-                        /"formattedPrice"\\s*:\\s*"([^"]+)"/,
-                        /"minActivityAmount"\\s*:\\s*{[^}]*"formattedPrice"\\s*:\\s*"([^"]+)"/,
-                        /"salePrice"\\s*:\\s*{[^}]*"formattedPrice"\\s*:\\s*"([^"]+)"/,
-                    ];
-                    for (const pat of patterns) {
-                        const m = t.match(pat);
-                        if (m) return m[1];
-                    }
-                    // Raw number patterns
-                    const numPatterns = [
-                        /"minAmount"\\s*:\\s*{\\s*"value"\\s*:\\s*([\\d.]+)/,
-                        /"discountPrice"\\s*:\\s*{[^}]*"minPrice"\\s*:\\s*([\\d.]+)/,
-                        /"actMinPrice"\\s*:\\s*"?([\\d.]+)/,
-                        /"salePrice"\\s*:\\s*"?([\\d.]+)/,
-                    ];
-                    for (const pat of numPatterns) {
-                        const m = t.match(pat);
-                        if (m) return m[1];
-                    }
-                }
-
-                // Strategy B: Find visible price on page
-                const allEls = document.querySelectorAll('span, div, p, b, strong');
-                for (const el of allEls) {
-                    const t = (el.innerText || '').trim();
-                    if (!t || t.length > 30) continue;
-                    // Match prices like £9.30, $12.50, US $9.30
-                    const m = t.match(/(?:US\\s*)?[£$€]\\s*\\d+[.,]\\d{2}/);
-                    if (m && el.offsetParent !== null) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.top > 50 && rect.top < 600) return m[0];
-                    }
-                }
-
-                // Strategy C: Collect text from price containers
-                const containers = document.querySelectorAll('[class*="price"], [class*="Price"]');
-                for (const c of containers) {
-                    const t = c.innerText.replace(/\\s+/g, '').trim();
-                    const m = t.match(/[£$€]\\d+[.,]\\d{2}/);
-                    if (m) return m[0];
-                }
-                return '';
-            }
-            """)
-        except Exception:
-            pass
-
-        # --- STEP 2: Extract images, title, variations, shipping ---
+        # --- STEP 1: Extract images, title, variations from top of page ---
         data = detail_tab.evaluate(DETAIL_EXTRACT_JS)
-
         if data.get("images"):
             result["all_images"] = data["images"][:MAX_IMAGES]
         if data.get("variations"):
             result["variations"] = data["variations"]
         if data.get("title"):
             result["detail_title"] = data["title"]
-        if not result["detail_price"] and data.get("price"):
-            result["detail_price"] = data["price"]
         if data.get("shipping"):
             result["detail_shipping"] = data["shipping"]
-        if data.get("description"):
-            result["detail_description"] = data["description"]
+
+        # --- STEP 2: Get price from the page ---
+        # Price on AliExpress is "£ 10.79" in the sticky sidebar — rendered as
+        # split elements (£ symbol + number). Read by collapsing whitespace.
+        try:
+            price_text = detail_tab.evaluate("""
+            () => {
+                // Strategy A: Find price containers, collapse whitespace, extract price
+                const priceSels = [
+                    '[class*="price--current"]', '[class*="product-price-current"]',
+                    '[class*="snow-price"]', '[class*="price-current"]',
+                    '[class*="uniform-banner-box-price"]',
+                    '[class*="sale-price"]', '[class*="salePrice"]',
+                    '[class*="price"]',
+                ];
+                for (const sel of priceSels) {
+                    const els = document.querySelectorAll(sel);
+                    for (const el of els) {
+                        if (!el.offsetParent) continue;
+                        const t = el.innerText.replace(/\\s+/g, '').trim();
+                        const m = t.match(/[£$€]\\d+[.,]\\d{2}/);
+                        if (m) return m[0];
+                    }
+                }
+                // Strategy B: Search ALL visible elements for price pattern
+                const allEls = document.querySelectorAll('span, div, strong, b');
+                for (const el of allEls) {
+                    if (!el.offsetParent) continue;
+                    const t = el.innerText.replace(/\\s+/g, '').trim();
+                    if (t.length > 30) continue;
+                    const m = t.match(/[£$€]\\d+[.,]\\d{2}/);
+                    if (m) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.top > 0 && rect.top < 800) return m[0];
+                    }
+                }
+                // Strategy C: JSON data in script tags
+                const scripts = document.querySelectorAll('script');
+                for (const s of scripts) {
+                    const t = s.textContent || '';
+                    const patterns = [
+                        /"formattedActivityPrice"\\s*:\\s*"([^"]+)"/,
+                        /"formattedPrice"\\s*:\\s*"([^"]+)"/,
+                    ];
+                    for (const pat of patterns) {
+                        const m = t.match(pat);
+                        if (m) return m[1];
+                    }
+                    const m2 = t.match(/"minAmount"\\s*:\\s*{\\s*"value"\\s*:\\s*([\\d.]+)/);
+                    if (m2) return m2[1];
+                }
+                return '';
+            }
+            """)
+            if price_text:
+                result["detail_price"] = price_text
+        except Exception:
+            pass
 
         # If few images, scroll a bit and retry
         if len(result["all_images"]) <= 2:
@@ -1008,31 +1000,40 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             except Exception:
                 pass
 
-        # --- STEP 3: Get description by scrolling down (DO NOT click Description tab) ---
-        # AliExpress Description tab opens a reviews popup — the actual description
-        # is embedded in the page body below the product info section.
+        # --- STEP 3: Scroll to tab bar, click Specifications, then Description ---
+        # AliExpress has tabs: Customer Reviews | Specifications | Description | Store | More to love
+        # These are inline tabs that switch content, NOT popups.
+        # We need to scroll to the tab bar first to make the tabs visible.
         try:
-            # Scroll down through the page to load the description section
-            detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
-            detail_tab.wait_for_timeout(1000)
-            detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.7)")
-            detail_tab.wait_for_timeout(1000)
+            # Scroll to the tab bar area — look for any nav containing Description + Store
+            detail_tab.evaluate("""
+            () => {
+                const allEls = document.querySelectorAll('div, nav, ul');
+                for (const el of allEls) {
+                    const t = (el.innerText || '').toLowerCase();
+                    // Tab bar has at least Description and Store (not all have Reviews)
+                    if (t.includes('description') && t.includes('store')
+                        && el.offsetParent !== null && el.getBoundingClientRect().height < 100) {
+                        el.scrollIntoView({block: 'start'});
+                        return true;
+                    }
+                }
+                window.scrollTo(0, document.body.scrollHeight * 0.4);
+                return false;
+            }
+            """)
+            detail_tab.wait_for_timeout(800)
 
-            # Close any popup/modal that appeared (reviews popup etc)
+            # --- Click "Specifications" tab first ---
+            specs_text = ""
             try:
-                detail_tab.evaluate("""
+                specs_clicked = detail_tab.evaluate("""
                 () => {
-                    // Close modals/popups by clicking X buttons or overlay
-                    const closeSels = [
-                        '[class*="modal"] [class*="close"]', '[class*="Modal"] [class*="close"]',
-                        '[class*="popup"] [class*="close"]', '[class*="Popup"] [class*="close"]',
-                        '[class*="overlay"] [class*="close"]',
-                        'button[aria-label="Close"]', '[class*="close-btn"]',
-                        '[class*="dialog"] [class*="close"]',
-                    ];
-                    for (const sel of closeSels) {
-                        const el = document.querySelector(sel);
-                        if (el && el.offsetParent !== null) {
+                    const allEls = document.querySelectorAll('a, span, div, li, button');
+                    for (const el of allEls) {
+                        const t = (el.textContent || '').trim();
+                        if (t === 'Specifications' && el.offsetParent !== null
+                            && el.getBoundingClientRect().height < 60) {
                             el.click();
                             return true;
                         }
@@ -1040,71 +1041,217 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     return false;
                 }
                 """)
+                if specs_clicked:
+                    log.info("      Clicked Specifications tab")
+                    detail_tab.wait_for_timeout(1500)
+
+                    # Click "View more" if specs are truncated
+                    try:
+                        detail_tab.evaluate("""
+                        () => {
+                            const btns = document.querySelectorAll('button, a, span, div');
+                            for (const btn of btns) {
+                                const t = (btn.innerText || '').trim().toLowerCase();
+                                if ((t === 'view more' || t === 'show more') && btn.offsetParent !== null
+                                    && btn.getBoundingClientRect().height < 60) {
+                                    btn.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        """)
+                        detail_tab.wait_for_timeout(800)
+                    except Exception:
+                        pass
+
+                    # Extract specifications — filter out brand and country of origin
+                    specs_text = detail_tab.evaluate("""
+                    () => {
+                        const specSels = [
+                            '[class*="specification"]', '[class*="Specification"]',
+                            '[class*="product-specs"]', '[class*="sku-info"]',
+                            '[class*="product-properties"]', '[class*="detail-attributes"]',
+                        ];
+                        let lines = [];
+                        for (const sel of specSels) {
+                            const el = document.querySelector(sel);
+                            if (el && el.offsetParent !== null) {
+                                // Get individual spec rows
+                                const rows = el.querySelectorAll('li, tr, [class*="property-item"], [class*="attr-item"], div');
+                                for (const row of rows) {
+                                    const t = row.innerText.trim().replace(/\\s+/g, ' ');
+                                    if (t.length < 3 || t.length > 200) continue;
+                                    const lower = t.toLowerCase();
+                                    // Skip brand and country of origin
+                                    if (lower.startsWith('brand') || lower.includes('country of origin')
+                                        || lower.includes('origin:') || lower.startsWith('origin')) continue;
+                                    if (!lines.includes(t)) lines.push(t);
+                                }
+                                if (lines.length > 0) break;
+                                // Fallback: get full text
+                                const t = el.innerText.trim();
+                                if (t.length > 10) {
+                                    // Filter out brand/origin lines
+                                    const filtered = t.split('\\n')
+                                        .filter(l => !l.toLowerCase().startsWith('brand')
+                                            && !l.toLowerCase().includes('country of origin')
+                                            && !l.toLowerCase().includes('origin:'))
+                                        .join('\\n');
+                                    return filtered;
+                                }
+                            }
+                        }
+                        return lines.join(' | ');
+                    }
+                    """)
+                    if specs_text:
+                        log.info("      Specs: %s", specs_text[:100])
             except Exception:
                 pass
 
-            # Re-extract — description section may now be loaded in the DOM
-            data3 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
-            if data3.get("description") and len(data3.get("description", "")) > len(result["detail_description"]):
-                result["detail_description"] = data3["description"]
+            # --- Click "Description" tab ---
+            desc_text = ""
+            try:
+                desc_clicked = detail_tab.evaluate("""
+                () => {
+                    const allEls = document.querySelectorAll('a, span, div, li, button');
+                    for (const el of allEls) {
+                        const t = (el.textContent || '').trim();
+                        if (t === 'Description' && el.offsetParent !== null
+                            && el.getBoundingClientRect().height < 60) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                """)
+                if desc_clicked:
+                    log.info("      Clicked Description tab")
+                    detail_tab.wait_for_timeout(1500)
 
-            # If still no description, try extracting from the page's embedded HTML content
-            if not result["detail_description"] or len(result["detail_description"]) < 50:
-                try:
+                    # Click "View more" to expand description
+                    try:
+                        detail_tab.evaluate("""
+                        () => {
+                            const btns = document.querySelectorAll('button, a, span, div');
+                            for (const btn of btns) {
+                                const t = (btn.innerText || '').trim().toLowerCase();
+                                if ((t === 'view more' || t === 'show more') && btn.offsetParent !== null
+                                    && btn.getBoundingClientRect().height < 60) {
+                                    btn.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        """)
+                        detail_tab.wait_for_timeout(1000)
+                    except Exception:
+                        pass
+
+                    # Click "View more" repeatedly until regulatory info or no button
+                    for _vm in range(3):
+                        try:
+                            vm_clicked = detail_tab.evaluate("""
+                            () => {
+                                // Check if regulatory info is now visible — stop if so
+                                const body = document.body.innerText.toLowerCase();
+                                if (body.includes('additional regulatory information')
+                                    || body.includes('regulatory information')) return 'stop';
+                                const btns = document.querySelectorAll('button, a, span, div');
+                                for (const btn of btns) {
+                                    const t = (btn.innerText || '').trim().toLowerCase();
+                                    if ((t === 'view more' || t === 'show more') && btn.offsetParent !== null
+                                        && btn.getBoundingClientRect().height < 60) {
+                                        btn.click();
+                                        return 'clicked';
+                                    }
+                                }
+                                return 'none';
+                            }
+                            """)
+                            if vm_clicked == 'clicked':
+                                detail_tab.wait_for_timeout(1000)
+                            else:
+                                break
+                        except Exception:
+                            break
+
+                    # Extract description content — stop at regulatory info
                     desc_text = detail_tab.evaluate("""
                     () => {
-                        // Look for description in iframes (AliExpress often puts it in an iframe)
-                        const iframes = document.querySelectorAll('iframe');
-                        for (const iframe of iframes) {
-                            try {
-                                const doc = iframe.contentDocument || iframe.contentWindow.document;
-                                if (doc && doc.body) {
-                                    const t = doc.body.innerText.trim();
-                                    if (t.length > 50) return t.substring(0, 2000);
-                                }
-                            } catch(e) {} // cross-origin will fail, that's fine
-                        }
-
-                        // Look for the description section by common patterns
                         const descSels = [
-                            '[class*="product-description"] [class*="content"]',
-                            '[class*="description-content"]',
+                            '[class*="product-description"]', '[class*="ProductDescription"]',
                             '[class*="detail-desc"]', '[id*="product-description"]',
-                            '[class*="product-detail-info"]',
+                            '[class*="description-content"]',
                             '[data-pl="product-description"]',
-                            '[class*="ProductDescription"]',
                         ];
+                        let text = '';
                         for (const sel of descSels) {
                             const el = document.querySelector(sel);
-                            if (el) {
-                                const t = el.innerText.trim();
-                                if (t.length > 50) return t.substring(0, 2000);
+                            if (el && el.offsetParent !== null) {
+                                text = el.innerText.trim();
+                                if (text.length > 20) break;
                             }
                         }
-
-                        // Look for large text blocks below the product info
-                        const allDivs = document.querySelectorAll('div');
-                        for (const div of allDivs) {
-                            const t = div.innerText.trim();
-                            const rect = div.getBoundingClientRect();
-                            // Must be below the fold and have substantial text
-                            if (t.length > 100 && t.length < 3000 && rect.top > 500) {
-                                // Skip if it looks like reviews
-                                const lower = t.toLowerCase();
-                                if (lower.includes('verified purchase') || lower.includes('ratings')
-                                    || lower.includes('helpful (') || lower.includes('all ratings')) continue;
-                                return t.substring(0, 2000);
+                        // If no description container found, get visible content area
+                        if (!text) {
+                            // Find the largest visible content block
+                            const divs = document.querySelectorAll('div');
+                            for (const div of divs) {
+                                const t = div.innerText.trim();
+                                if (t.length > 50 && t.length < 5000 && div.offsetParent !== null) {
+                                    const rect = div.getBoundingClientRect();
+                                    if (rect.top > 0 && rect.top < 2000 && rect.height > 200) {
+                                        const lower = t.toLowerCase();
+                                        // Skip reviews, store info
+                                        if (lower.includes('verified purchase') || lower.includes('all ratings')
+                                            || lower.includes('helpful (')) continue;
+                                        text = t;
+                                        break;
+                                    }
+                                }
                             }
                         }
-                        return '';
+                        // Truncate at regulatory/store sections
+                        const cutoffs = [
+                            'additional regulatory information',
+                            'regulatory information',
+                        ];
+                        const lower = text.toLowerCase();
+                        for (const cutoff of cutoffs) {
+                            const idx = lower.indexOf(cutoff);
+                            if (idx > 0) {
+                                text = text.substring(0, idx).trim();
+                                break;
+                            }
+                        }
+                        return text.substring(0, 3000);
                     }
                     """)
-                    if desc_text and len(desc_text) > len(result["detail_description"]):
-                        result["detail_description"] = desc_text
-                except Exception:
-                    pass
+            except Exception:
+                pass
+
+            # Log description result
+            if desc_text:
+                log.info("      Description: %d chars — %s", len(desc_text), desc_text[:80])
+            else:
+                log.info("      Description: none found")
+
+            # Combine specs + description
+            combined = ""
+            if specs_text:
+                combined += specs_text
+            if desc_text:
+                if combined:
+                    combined += "\n"
+                combined += desc_text
+            if combined:
+                result["detail_description"] = combined
         except Exception as e:
-            log.debug("      Description extraction error: %s", str(e)[:80])
+            log.debug("      Specs/description error: %s", str(e)[:80])
 
     except Exception as e:
         log.debug("  Detail scrape failed for %s: %s", product_id, str(e)[:80])
@@ -1195,7 +1342,7 @@ def scrape_details_parallel(context, products, main_tab):
                     tabs[i].goto(product["product_url"], wait_until="commit", timeout=10000)
                 except Exception:
                     pass
-            time.sleep(random.uniform(2.5, 4.5))
+            time.sleep(random.uniform(2.0, 3.5))
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -2313,7 +2460,6 @@ def _extract_specs_from_ali_desc(ali_desc):
         (r'(?:colou?r)\s*[:\-]?\s*(.+)', 'Colour'),
         (r'(?:package\s+includes?|includes?|contents?|what.s in the box)\s*[:\-]?\s*(.+)', 'Includes'),
         (r'(?:suitable\s+for|recommended\s+(?:for|age))\s*[:\-]?\s*(.+)', 'Suitable For'),
-        (r'(?:brand)\s*[:\-]?\s*(.+)', 'Brand'),
         (r'(?:type|style)\s*[:\-]?\s*(.+)', 'Type'),
         (r'(?:number\s+of\s+pieces|pieces|parts)\s*[:\-]?\s*(.+)', 'Pieces'),
     ]
@@ -2329,6 +2475,11 @@ def _extract_specs_from_ali_desc(ali_desc):
 
         # Skip spam
         if any(w in low for w in spam_words):
+            continue
+        # Skip brand and country of origin
+        if low.startswith('brand') or 'country of origin' in low or low.startswith('origin'):
+            continue
+        if 'china' in low and ('origin' in low or 'made in' in low):
             continue
         # Skip lines that are mostly punctuation, caps-lock shouting, or prices
         if re.search(r'[!]{2,}|[$€£¥]\s*\d|http|www\.|\.com|\.cn|@', line):
@@ -3593,7 +3744,7 @@ def main():
                                 pid = product["id"]
                                 product_url = product["product_url"]
                                 if p_idx > 0:
-                                    time.sleep(random.uniform(2.5, 4.5))
+                                    time.sleep(random.uniform(2.0, 3.5))
                                 log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
                                 handle_captcha(tab)
                                 detail_results.append(scrape_product_detail(detail_tab, product_url, pid, context=context, main_tab=tab))
@@ -3688,7 +3839,7 @@ def main():
                         log.info("  Could not reach page %d — done.", pg)
                         break
 
-                time.sleep(random.uniform(2.5, 4.5))
+                time.sleep(random.uniform(2.0, 3.5))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
