@@ -1058,12 +1058,12 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
 
             # --- DESCRIPTION EXTRACTION ---
 
-            # Remove early listener (no longer needed after page load)
+            # Remove early listener
             try:
                 detail_tab.remove_listener("response", _early_on_response)
             except Exception:
                 pass
-            # If early listener caught a real moduleanalysis URL, cache it
+            # Cache moduleanalysis URL if early listener caught one
             if not _cached_moduleanalysis_url and _early_captured_module_url:
                 for _eu in _early_captured_module_url:
                     if "analysis.json" in _eu:
@@ -1071,495 +1071,84 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         log.info("      Desc: caught moduleanalysis URL during page load: %s", _eu[:120])
                         break
 
-            # If we already know which strategy works for this store, try it first
-            # and skip slow strategies (especially Strategy 4's 2s+ wait)
-            if _store_desc_strategy == "s5" and not desc_text:
-                log.info("      Desc: trying Strategy 5 (cached as working for store)...")
+            # METHOD A: If we have a cached moduleanalysis URL (store type 1), use it directly
+            if not desc_text and _cached_moduleanalysis_url:
+                log.info("      Desc: using cached moduleanalysis URL")
                 try:
-                    s5_result = detail_tab.evaluate("""
-                    () => {
-                        function extractDesc(html) {
-                            if (!html || html.length < 100) return null;
-                            if (!/<[a-z][^>]*>/i.test(html)) return null;
+                    desc_text = detail_tab.evaluate("""
+                    async (url) => {
+                        try {
+                            const resp = await fetch(url, {credentials: 'include'});
+                            if (!resp.ok) return '';
+                            const body = await resp.text();
+                            let html = body;
+                            if (body.trim().startsWith('{')) {
+                                try {
+                                    const j = JSON.parse(body);
+                                    if (j.data && typeof j.data === 'object') {
+                                        const values = Object.values(j.data);
+                                        for (const v of values) {
+                                            if (typeof v === 'string' && v.length > 50) { html = v; break; }
+                                        }
+                                    }
+                                    if (html === body) html = j.data?.description || j.content || '';
+                                } catch(e) {}
+                            }
                             const tmp = document.createElement('div');
                             tmp.innerHTML = html;
                             let firstImg = '';
                             tmp.querySelectorAll('img').forEach(img => {
                                 if (firstImg) return;
                                 const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                    && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                                if (src && src.includes('alicdn') && !src.includes('icon') && !src.includes('logo'))
+                                    firstImg = src;
                             });
                             tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
                             let text = tmp.innerText.trim();
-                            if (text.length < 150) return null;
-                            if (/^Buy\\s/i.test(text)) return null;
-                            if (/^Smarter Shopping/i.test(text)) return null;
-                            return {text: text.substring(0, 3000), img: firstImg};
-                        }
-                        const scripts = document.querySelectorAll('script');
-                        for (const s of scripts) {
-                            const t = s.textContent || '';
-                            if (t.length < 200 || t.length > 500000) continue;
-                            const patterns = [
-                                /"(?:descriptionContent|descriptionHtml|detailDesc|descContent)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
-                                /"(?:itemDescription|product_description|descriptionModule)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
-                            ];
-                            for (const p of patterns) {
-                                const m = t.match(p);
-                                if (m && m[1] && m[1].length > 100) {
-                                    let html = m[1];
-                                    try { html = JSON.parse('"' + html + '"'); } catch(e) {}
-                                    const r = extractDesc(html);
-                                    if (r) return JSON.stringify(r);
-                                }
-                            }
-                        }
-                        const globals = [window.runParams, window.__INIT_DATA__,
-                            window.runConfig, window.detailData, window.pageData, window.__pageData__];
-                        function deepSearch(obj, depth) {
-                            if (!obj || depth > 6) return null;
-                            if (typeof obj === 'string' && obj.length > 200 && /<[a-z][^>]*>/i.test(obj)) {
-                                const r = extractDesc(obj);
-                                if (r) return r;
-                            }
-                            if (typeof obj !== 'object') return null;
-                            try {
-                                for (const [k, v] of Object.entries(obj)) {
-                                    const kl = k.toLowerCase();
-                                    if (kl.includes('og') || kl.includes('meta') || kl.includes('seo')
-                                        || kl === 'title' || kl === 'name' || kl === 'subject') continue;
-                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail'
-                                        || kl === 'descriptionmodule') {
-                                        const r = deepSearch(v, depth + 1);
-                                        if (r) return r;
-                                    }
-                                }
-                            } catch(e) {}
-                            return null;
-                        }
-                        for (const g of globals) {
-                            if (!g) continue;
-                            const r = deepSearch(g, 0);
-                            if (r) return JSON.stringify(r);
-                        }
-                        return '';
-                    }
-                    """) or ""
-                    if s5_result:
-                        import json as _json7b
-                        parsed = _json7b.loads(s5_result)
-                        _s5t = (parsed.get("text") or "").strip()
-                        # Python-side reject: titles/meta, not real descriptions
-                        if _s5t and len(_s5t) >= 300 and not _s5t.startswith("Buy ") and not _s5t.startswith("Smarter Shopping"):
-                            desc_text = _s5t
-                            log.info("      Desc Strategy 5 (cached): got %d chars", len(desc_text))
-                            s5_img = parsed.get("img", "")
-                            if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                result["all_images"].append(s5_img)
-                                log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
-                        elif _s5t:
-                            log.info("      Desc Strategy 5 (cached): rejected (%d chars, starts='%s')", len(_s5t), _s5t[:30])
-                except Exception:
-                    pass
-
-            # Strategy 1: Search page source for description URL (skip if cache exists)
-            desc_url = ""
-            if not _cached_moduleanalysis_url and not desc_text:
-                log.info("      Desc: trying Strategy 1 (descriptionUrl in page source)...")
-                try:
-                    desc_url = detail_tab.evaluate("""
-                () => {
-                    // First check global JS data objects that AliExpress uses
-                    const globals = [
-                        window.runParams, window.__INIT_DATA__,
-                        window.runConfig, window.detailData,
-                        window.pageData, window.__pageData__
-                    ];
-                    for (const g of globals) {
-                        if (!g) continue;
-                        const s = JSON.stringify(g);
-                        const m = s.match(/"descriptionUrl"\\s*:\\s*"([^"]+)"/);
-                        if (m) {
-                            let url = m[1];
-                            if (url.startsWith('//')) url = 'https:' + url;
-                            return '__FOUND_GLOBAL__:' + url;
-                        }
-                    }
-
-                    const html = document.documentElement.innerHTML;
-                    // Try various patterns for the description URL
-                    const patterns = [
-                        /"descriptionUrl"\\s*:\\s*"(https?:[^"]+)"/,
-                        /"descriptionUrl"\\s*:\\s*"(\\/\\/[^"]+)"/,
-                        /descriptionUrl['":\\s]+(https?:\\/\\/[^"'\\s,}]+)/,
-                        /(https?:\\/\\/[a-z0-9-]+\\.alicdn\\.com\\/[^"'\\s]*desc[^"'\\s]*\\.htm[l]?)/i,
-                        /(\\/\\/[a-z0-9-]+\\.alicdn\\.com\\/[^"'\\s]*desc[^"'\\s]*\\.htm[l]?)/i,
-                    ];
-                    for (const p of patterns) {
-                        const m = html.match(p);
-                        if (m) {
-                            let url = m[1];
-                            if (url.startsWith('//')) url = 'https:' + url;
-                            return url;
-                        }
-                    }
-
-                    // Debug: search for ANY mention of "description" near a URL
-                    const descContext = html.match(/.{0,50}description.{0,200}/i);
-                    if (descContext) return '__DEBUG__:' + descContext[0].substring(0, 200);
-
-                    return '';
-                    }
-                    """) or ""
-                except Exception as e:
-                    log.info("      Desc Strategy 1 error: %s", str(e)[:120])
-                    desc_url = ""
-
-            if desc_url and desc_url.startswith("__DEBUG__:"):
-                log.info("      Desc Strategy 1 debug (no URL, but found context): %s", desc_url[10:200])
-                desc_url = ""
-            elif desc_url and desc_url.startswith("__FOUND_GLOBAL__:"):
-                desc_url = desc_url[17:]
-                log.info("      Desc Strategy 1: found URL in global JS: %s", desc_url[:120])
-
-            if desc_url:
-                log.info("      Desc URL found: %s", desc_url[:120])
-                try:
-                    desc_text = detail_tab.evaluate("""
-                    async (url) => {
-                        try {
-                            const resp = await fetch(url);
-                            const html = await resp.text();
-                            const tmp = document.createElement('div');
-                            tmp.innerHTML = html;
-                            tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                            let text = tmp.innerText.trim();
-                            const lower = text.toLowerCase();
-                            for (const cut of ['additional regulatory', 'regulatory information']) {
-                                const idx = lower.indexOf(cut);
-                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
-                            }
-                            return text.substring(0, 3000);
+                            if (text.length < 50) return '';
+                            return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
                         } catch(e) { return ''; }
                     }
-                    """, desc_url) or ""
+                    """, _cached_moduleanalysis_url) or ""
+                    if desc_text:
+                        try:
+                            import json as _json_ma
+                            parsed_ma = _json_ma.loads(desc_text)
+                            desc_text = parsed_ma.get("text", "")
+                            ma_img = parsed_ma.get("img", "")
+                            if ma_img and ma_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                result["all_images"].append(ma_img)
+                                log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                        except Exception:
+                            pass
+                    if desc_text:
+                        log.info("      Desc: got %d chars from moduleanalysis API", len(desc_text))
                 except Exception:
                     pass
 
-            # Strategy 2: Try API endpoints (non-destructive, no page changes)
-            if not desc_text and product_id:
-                log.info("      Desc: trying Strategy 2 (API endpoints)...")
-                # Try to find moduleanalysis params from page source
+            # METHOD B: Click Description tab, click View More, read from iframe
+            # This is how the description actually loads on AliExpress:
+            # 1. Click "Description" tab to show the section
+            # 2. Click "View More" to expand it
+            # 3. An iframe loads from aeproductsourcesite with the content
+            # 4. Read from the iframe OR from the network response
+            if not desc_text:
+                log.info("      Desc: clicking Description tab + View More...")
                 try:
-                    module_url = detail_tab.evaluate("""
-                    () => {
-                        const html = document.documentElement.innerHTML;
-                        // Look for moduleIds and adminAccountId in page source — multiple patterns
-                        const modPatterns = [
-                            /moduleIds[=:]["']?(\\d+)/,
-                            /"moduleIds?"\\s*:\\s*"?(\\d+)/,
-                            /moduleId['"\\s:=]+(\\d{5,})/,
-                            /descriptionModule.*?"id"\\s*:\\s*(\\d+)/s,
-                        ];
-                        const adminPatterns = [
-                            /adminAccountId[=:]["']?(\\d+)/,
-                            /"adminAccountId"\\s*:\\s*"?(\\d+)/,
-                            /storeAdminId['"\\s:=]+(\\d+)/,
-                            /sellerId['"\\s:=]+(\\d+)/,
-                            /adminId['"\\s:=]+(\\d+)/,
-                        ];
-                        let modId = '', admId = '';
-                        for (const p of modPatterns) {
-                            const m = html.match(p);
-                            if (m) { modId = m[1]; break; }
-                        }
-                        for (const p of adminPatterns) {
-                            const m = html.match(p);
-                            if (m) { admId = m[1]; break; }
-                        }
-                        if (modId && admId) {
-                            return 'https://moduleanalysis.aliexpress.com/item/desc/module/analysis.json?moduleIds='
-                                + modId + '&adminAccountId=' + admId;
-                        }
-                        // Also check script tags for storeModule or descriptionModule
-                        const scripts = document.querySelectorAll('script');
-                        for (const s of scripts) {
-                            const t = s.textContent || '';
-                            if (t.length < 50) continue;
-                            let m1 = null, m2 = null;
-                            for (const p of modPatterns) {
-                                m1 = t.match(p);
-                                if (m1) break;
-                            }
-                            for (const p of adminPatterns) {
-                                m2 = t.match(p);
-                                if (m2) break;
-                            }
-                            if (m1 && m2) {
-                                return 'https://moduleanalysis.aliexpress.com/item/desc/module/analysis.json?moduleIds='
-                                    + m1[1] + '&adminAccountId=' + m2[1];
-                            }
-                        }
-                        return '';
-                    }
-                    """) or ""
-                except Exception:
-                    module_url = ""
-                api_urls = []
-                # Try cached moduleanalysis URL first (same for all products in a store)
-                if _cached_moduleanalysis_url:
-                    api_urls.append(_cached_moduleanalysis_url)
-                    log.info("      Desc: using cached moduleanalysis URL")
-                if module_url and module_url not in api_urls:
-                    api_urls.append(module_url)
-                    log.info("      Desc: found moduleanalysis URL: %s", module_url[:120])
-                api_urls.extend([
-                    f"https://www.aliexpress.com/aer-api/module/item/description?productId={product_id}",
-                    f"https://www.aliexpress.com/fn/item-description/index.html?productId={product_id}",
-                    f"https://aeproductsourcesite.alicdn.com/product/description/pc/{product_id}.html",
-                    f"https://www.aliexpress.com/aeglobal/ae/item/description/query?productId={product_id}",
-                    f"https://www.aliexpress.com/aer-jsonapi/module/item/description?productId={product_id}",
-                ])
-                for api_url in api_urls:
-                    if desc_text:
-                        break
-                    try:
-                        desc_text = detail_tab.evaluate("""
-                        async (url) => {
-                            try {
-                                const resp = await fetch(url, {credentials: 'include'});
-                                if (!resp.ok) return '';
-                                const contentType = resp.headers.get('content-type') || '';
-                                const body = await resp.text();
-                                // If JSON response, extract HTML from it
-                                let html = body;
-                                if (contentType.includes('json') || body.trim().startsWith('{')) {
-                                    try {
-                                        const j = JSON.parse(body);
-                                        // moduleanalysis format: {data: {moduleId: "html content"}}
-                                        if (j.data && typeof j.data === 'object' && !j.data.description) {
-                                            const values = Object.values(j.data);
-                                            for (const v of values) {
-                                                if (typeof v === 'string' && v.length > 50) {
-                                                    html = v;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if (html === body) {
-                                            html = j.data?.description || j.data?.content || j.description || j.content || j.result || '';
-                                            if (typeof html !== 'string') html = JSON.stringify(html);
-                                        }
-                                    } catch(e) { html = body; }
-                                }
-                                const tmp = document.createElement('div');
-                                tmp.innerHTML = html;
-                                // Get first description image before removing imgs
-                                let firstImg = '';
-                                tmp.querySelectorAll('img').forEach(img => {
-                                    if (firstImg) return;
-                                    const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                    if (src && src.includes('alicdn') && !src.includes('icon')
-                                        && !src.includes('logo') && !src.includes('thumbnail')) {
-                                        firstImg = src;
-                                    }
-                                });
-                                if (!firstImg) {
-                                    const imgMatch = html.match(/src=['"]?(https?:\/\/[^'"\\s>]+(?:alicdn|ae01|ae04)[^'"\\s>]*\\.(?:jpg|png|jpeg|webp))/i);
-                                    if (imgMatch) firstImg = imgMatch[1];
-                                }
-                                tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                let text = tmp.innerText.trim();
-                                // Reject 404 pages and garbage
-                                if (text.includes('404') || text.includes("can't find") || text.includes('Sorry')) return '';
-                                if (/^Buy\\s/i.test(text)) return '';
-                                if (text.length >= 50) return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
-                                return '';
-                            } catch(e) { return ''; }
-                        }
-                        """, api_url) or ""
-                        if desc_text:
-                            try:
-                                import json as _json2
-                                parsed2 = _json2.loads(desc_text)
-                                desc_text = parsed2.get("text", desc_text)
-                                s2_img = parsed2.get("img", "")
-                                # Python-side: if JS returned raw JSON text, parse it
-                                if desc_text and desc_text.lstrip().startswith("{"):
-                                    try:
-                                        j2 = _json2.loads(desc_text)
-                                        if isinstance(j2.get("data"), dict):
-                                            for v in j2["data"].values():
-                                                if isinstance(v, str) and len(v) > 50:
-                                                    import re as _re3
-                                                    clean = _re3.sub(r'<[^>]+>', ' ', v)
-                                                    desc_text = _re3.sub(r'\s+', ' ', clean).strip()[:3000]
-                                                    if not s2_img:
-                                                        img_m = _re3.search(r'src=["\']?(https?://[^"\'>\s]+(?:alicdn|ae01|ae04)[^"\'>\s]*\.(?:jpg|png|jpeg|webp))', v, _re3.IGNORECASE)
-                                                        if img_m:
-                                                            s2_img = img_m.group(1)
-                                                    break
-                                    except Exception:
-                                        pass
-                                if s2_img and s2_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                    result["all_images"].append(s2_img)
-                                    log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
-                            except (json.JSONDecodeError, TypeError, ValueError):
-                                # desc_text might be raw moduleanalysis JSON
-                                if desc_text.lstrip().startswith("{"):
-                                    try:
-                                        import json as _json2b
-                                        import re as _re3b
-                                        j2 = _json2b.loads(desc_text)
-                                        if isinstance(j2.get("data"), dict):
-                                            for v in j2["data"].values():
-                                                if isinstance(v, str) and len(v) > 50:
-                                                    clean = _re3b.sub(r'<[^>]+>', ' ', v)
-                                                    desc_text = _re3b.sub(r'\s+', ' ', clean).strip()[:3000]
-                                                    img_m = _re3b.search(r'src=["\']?(https?://[^"\'>\s]+(?:alicdn|ae01|ae04)[^"\'>\s]*\.(?:jpg|png|jpeg|webp))', v, _re3b.IGNORECASE)
-                                                    if img_m and img_m.group(1) not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                                        result["all_images"].append(img_m.group(1))
-                                                    break
-                                    except Exception:
-                                        desc_text = ""
-                            # Reject JS code
-                            if desc_text and (desc_text.lstrip().startswith("/*") or "function(e){" in desc_text[:100]):
-                                desc_text = ""
-                            if desc_text:
-                                log.info("      Desc Strategy 2: got %d chars from %s", len(desc_text), api_url[:80])
-                                if not _store_desc_strategy:
-                                    _store_desc_strategy = "s2"
-                            # Cache moduleanalysis URL if it worked
-                            if "moduleanalysis" in api_url and "analysis.json" in api_url:
-                                _cached_moduleanalysis_url = api_url
-                    except Exception:
-                        pass
-
-            # Strategy 3: Extract description from page's embedded JSON data (skip if cache exists)
-            if not desc_text and not _cached_moduleanalysis_url:
-                log.info("      Desc: trying Strategy 3 (embedded page JSON)...")
-                try:
-                    desc_text = detail_tab.evaluate("""
-                    () => {
-                        const html = document.documentElement.innerHTML;
-
-                        // Look for description in embedded data
-                        const dataPatterns = [
-                            /"descriptionContent"\\s*:\\s*"([^"]{50,})"/,
-                            /"detailDesc"\\s*:\\s*"([^"]{50,})"/,
-                            /"detail"\\s*:\\s*\\{[^}]*"description"\\s*:\\s*"([^"]{50,})"/,
-                        ];
-                        for (const p of dataPatterns) {
-                            const m = html.match(p);
-                            if (m) {
-                                try {
-                                    let text = JSON.parse('"' + m[1] + '"');
-                                    if (/^Buy\\s/i.test(text.trim())) continue;
-                                    if (text.includes('<')) {
-                                        const tmp = document.createElement('div');
-                                        tmp.innerHTML = text;
-                                        tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                        text = tmp.innerText.trim();
-                                    }
-                                    if (text.length >= 50) return text.substring(0, 3000);
-                                } catch(e) {}
-                            }
-                        }
-
-                        // Look for descriptionUrl in any format
-                        const urlPatterns = [
-                            /['"](https?:\/\/[^'"\\s]*desc[^'"\\s]*\.html?)['"]/i,
-                            /['"](\/\/[^'"\\s]*desc[^'"\\s]*\.html?)['"]/i,
-                            /['"](https?:\/\/[^'"\\s]*alicdn[^'"\\s]*desc[^'"\\s]*)['"]/i,
-                        ];
-                        for (const p of urlPatterns) {
-                            const m = html.match(p);
-                            if (m) {
-                                return '__URL__:' + m[1];
-                            }
-                        }
-
-                        // Search script content for HTML description
-                        const scripts = document.querySelectorAll('script');
-                        for (const s of scripts) {
-                            const t = s.textContent || '';
-                            if (t.length < 200) continue;
-                            const htmlMatch = t.match(/"(?:description|desc|detail)(?:Html|Content|Text)?"\\s*:\\s*"(<[^"]{100,})"/i);
-                            if (htmlMatch) {
-                                try {
-                                    let decoded = JSON.parse('"' + htmlMatch[1] + '"');
-                                    const tmp = document.createElement('div');
-                                    tmp.innerHTML = decoded;
-                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                    const text = tmp.innerText.trim();
-                                    if (text.length >= 50) return text.substring(0, 3000);
-                                } catch(e) {}
-                            }
-                        }
-
-                        return '';
-                    }
-                    """) or ""
-
-                    if desc_text and desc_text.startswith("__URL__:"):
-                        found_url = desc_text[8:]
-                        if found_url.startswith("//"):
-                            found_url = "https:" + found_url
-                        log.info("      Desc Strategy 3: found desc URL: %s", found_url[:120])
-                        try:
-                            desc_text = detail_tab.evaluate("""
-                            async (url) => {
-                                try {
-                                    const resp = await fetch(url);
-                                    if (!resp.ok) return '';
-                                    const html = await resp.text();
-                                    const tmp = document.createElement('div');
-                                    tmp.innerHTML = html;
-                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                                    let text = tmp.innerText.trim();
-                                    if (text.length >= 50) return text.substring(0, 3000);
-                                    return '';
-                                } catch(e) { return ''; }
-                            }
-                            """, found_url) or ""
-                        except Exception:
-                            desc_text = ""
-                    elif desc_text:
-                        log.info("      Desc Strategy 3: got %d chars from embedded JSON", len(desc_text))
-                except Exception as e:
-                    log.info("      Desc Strategy 3 error: %s", str(e)[:120])
-
-            # Strategy 4: Intercept network requests + click View More
-            # Skip if Strategy 5 is known to work for this store (saves ~5s per product)
-            if not desc_text and _store_desc_strategy != "s5":
-                log.info("      Desc: trying Strategy 4 (network intercept + View More)...")
-                try:
-                    # Set up network request capture BEFORE clicking View More
-                    # Capture ALL JSON/HTML responses — some stores use URLs without "desc" keyword
-                    captured_urls = []
-                    def _on_response(response):
+                    # Set up network listener to catch desc.htm iframe load
+                    _desc_captured = []
+                    def _on_desc_response(response):
                         try:
                             url = response.url
-                            ct = response.headers.get("content-type", "") or ""
-                            ul = url.lower()
-                            # Capture: desc-related URLs OR any JSON/HTML response (could be description)
-                            is_desc_url = any(k in ul for k in ["desc", "description", "detail-desc",
-                                    "moduleanalysis", "item/detail", "richtext", "item-description",
-                                    "module/analysis", "product/detail", "aeproductsourcesite"])
-                            is_content = ("json" in ct or "html" in ct) and response.status == 200
-                            # Skip tracking/analytics/images
-                            is_noise = any(k in ul for k in ["goldlog", "beacon", "tracker", "analytics",
-                                    ".png", ".jpg", ".gif", ".webp", ".css", ".js", "google", "facebook",
-                                    "lazada", "aplus", "retcode", "arms", "wpk."])
-                            if is_desc_url or (is_content and not is_noise):
-                                captured_urls.append({"url": url, "status": response.status, "ct": ct,
-                                                      "is_desc": is_desc_url})
+                            if response.status == 200 and ("aeproductsourcesite" in url or
+                                ("desc" in url.lower() and ("json" in (response.headers.get("content-type","") or "")
+                                 or "html" in (response.headers.get("content-type","") or "")))):
+                                _desc_captured.append(url)
                         except Exception:
                             pass
-                    detail_tab.on("response", _on_response)
+                    detail_tab.on("response", _on_desc_response)
 
-                    # STEP 1: Click the "Description" tab to make description section visible
+                    # Click Description tab
                     try:
                         detail_tab.evaluate("""
                         () => {
@@ -1579,15 +1168,13 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         pass
                     detail_tab.wait_for_timeout(1000)
 
-                    # STEP 2: Scroll to description area
+                    # Scroll down to description area
                     detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
                     detail_tab.wait_for_timeout(500)
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    detail_tab.wait_for_timeout(500)
 
-                    # STEP 3: Click "View more" to expand description
+                    # Click View More (the one near description, not reviews)
                     try:
-                        clicked_vm = detail_tab.evaluate("""
+                        detail_tab.evaluate("""
                         () => {
                             let regulatoryY = Infinity;
                             const allEls = document.querySelectorAll('h2, h3, h4, div, span, p, strong, b');
@@ -1608,486 +1195,143 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 vmButtons.push({btn, y: btnY});
                             }
                             if (vmButtons.length === 0) return false;
+                            // Click the View More closest ABOVE "additional regulatory"
                             if (regulatoryY < Infinity) {
                                 let bestBtn = null, bestDist = Infinity;
                                 for (const {btn, y} of vmButtons) {
                                     const dist = regulatoryY - y;
                                     if (dist > 0 && dist < bestDist) { bestBtn = btn; bestDist = dist; }
                                 }
-                                if (bestBtn) { bestBtn.scrollIntoView({block: 'center'}); bestBtn.click(); return 'above regulatory'; }
+                                if (bestBtn) { bestBtn.scrollIntoView({block: 'center'}); bestBtn.click(); return true; }
                             }
-                            const descEl = document.querySelector('[class*="description--wrap"], [class*="description--store"], .product-description, [class*="product-description"]');
-                            if (descEl) {
-                                const descY = descEl.getBoundingClientRect().top + window.scrollY;
-                                let bestBtn = null, bestDist = Infinity;
-                                for (const {btn, y} of vmButtons) {
-                                    const dist = y - descY;
-                                    if (dist > 0 && dist < 2000 && dist < bestDist) { bestBtn = btn; bestDist = dist; }
-                                }
-                                if (bestBtn) { bestBtn.scrollIntoView({block: 'center'}); bestBtn.click(); return 'near description'; }
-                            }
-                            // Last resort: click the first View More
-                            vmButtons[0].btn.scrollIntoView({block: 'center'});
-                            vmButtons[0].btn.click();
-                            return 'first button';
+                            // Fallback: last View More on the page (usually the description one)
+                            const last = vmButtons[vmButtons.length - 1];
+                            last.btn.scrollIntoView({block: 'center'});
+                            last.btn.click();
+                            return true;
                         }
                         """)
-                        if clicked_vm:
-                            log.info("      Desc: clicked View More (%s)", str(clicked_vm)[:40])
                     except Exception:
                         pass
 
-                    # Wait for iframe to load (description is in an iframe from aeproductsourcesite)
+                    # Wait for iframe to load
                     detail_tab.wait_for_timeout(3000)
-
-                    # Extract description from page text — works for ALL AliExpress stores
-                    # The page always has: Description\nreport\n[content]\nAdditional regulatory
-                    # This is the same text visible on the page, no API or CSS class needed
-                    if not desc_text:
-                        try:
-                            vm_result = detail_tab.evaluate("""
-                            () => {
-                                // Get the full page text and find the Description section
-                                const fullText = document.body.innerText;
-                                // Find "Description" section marker (not in tab bar — look for it
-                                // followed by actual content, not just other tab names)
-                                let descIdx = -1;
-                                const markers = ['\\nDescription\\nreport\\n', '\\nDescription\\n'];
-                                for (const marker of markers) {
-                                    const idx = fullText.indexOf(marker);
-                                    if (idx >= 0) {
-                                        descIdx = idx + marker.length;
-                                        break;
-                                    }
-                                }
-                                if (descIdx < 0) return '';
-
-                                // Extract text from Description to Additional regulatory
-                                let descContent = fullText.substring(descIdx);
-                                // Remove "report" prefix if present
-                                descContent = descContent.replace(/^report\\s*\\n?/, '');
-                                // Cut at regulatory section or other end markers
-                                const endMarkers = ['Additional regulatory', 'Product compliance',
-                                                    '\\nSold By\\n', '\\nService commitment\\n'];
-                                for (const end of endMarkers) {
-                                    const idx = descContent.indexOf(end);
-                                    if (idx > 0) { descContent = descContent.substring(0, idx); break; }
-                                }
-                                descContent = descContent.trim();
-                                if (descContent.length < 30) return '';
-
-                                // Now find description images — look for the Description section
-                                // element in the DOM and grab alicdn images from it
-                                let firstImg = '';
-                                // Find the element containing our extracted text (first 40 chars)
-                                const snippet = descContent.substring(0, 40);
-                                const allEls = document.querySelectorAll('div, section, article, p');
-                                for (const el of allEls) {
-                                    if (el.innerText && el.innerText.includes(snippet)) {
-                                        // Found the description container — get images
-                                        el.querySelectorAll('img').forEach(img => {
-                                            if (firstImg) return;
-                                            const src = img.src || img.getAttribute('data-src') || '';
-                                            if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                                && !src.includes('icon') && !src.includes('logo')
-                                                && !src.includes('thumbnail') && !src.includes('avatar')
-                                                && !src.includes('flag')) {
-                                                firstImg = src;
-                                            }
-                                        });
-                                        if (firstImg) break;
-                                    }
-                                }
-
-                                return JSON.stringify({text: descContent.substring(0, 3000), img: firstImg});
-                            }
-                            """) or ""
-                            if vm_result:
-                                import json as _json_vm
-                                parsed_vm = _json_vm.loads(vm_result)
-                                t = (parsed_vm.get("text") or "").strip()
-                                img = parsed_vm.get("img", "")
-                                _t_bad = (t.startswith("View more") or t.startswith("Show more")
-                                          or t.startswith("See more") or "Buyer Questions" in t[:100]
-                                          or "Reviews" in t[:50])
-                                if t and len(t) >= 30 and not _t_bad:
-                                    desc_text = t
-                                    log.info("      Desc: got %d chars from page text (Description section)", len(desc_text))
-                                    if not _store_desc_strategy:
-                                        _store_desc_strategy = "s4text"
-                                if img and img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                    result["all_images"].append(img)
-                                    log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
-                        except Exception:
-                            pass
 
                     # Remove listener
                     try:
-                        detail_tab.remove_listener("response", _on_response)
+                        detail_tab.remove_listener("response", _on_desc_response)
                     except Exception:
                         pass
 
-                    # Sort captured URLs: desc-related first, then others
-                    log.info("      Desc: %d network responses captured after View More", len(captured_urls))
-                    if captured_urls:
-                        captured_urls.sort(key=lambda x: (0 if x.get("is_desc") else 1))
-                        for cu in captured_urls[:8]:
-                            log.info("      Desc captured: %s (status=%s, ct=%s, desc=%s)",
-                                     cu["url"][:120], cu["status"], cu["ct"][:40], cu.get("is_desc"))
-                            cu_url = cu["url"]
-                            cu_status = int(cu["status"])
-                            # Cache moduleanalysis URL for reuse across products (per-store, reusable)
-                            if cu_status == 200 and "moduleanalysis" in cu_url and "analysis.json" in cu_url:
-                                _cached_moduleanalysis_url = cu_url
-                                log.info("      Desc: CACHED moduleanalysis URL for store")
-
-                    # Try to fetch each captured URL for description content
-                    # Only try desc-related URLs, skip recommendation/analytics garbage
-                    desc_img = ""
-                    for cu in captured_urls:
+                    # Try 1: Fetch any captured desc URL
+                    for cap_url in _desc_captured:
                         if desc_text:
                             break
-                        if cu["status"] != 200:
-                            continue
-                        # Skip non-desc URLs (recommendation API, wp.html, etc)
-                        if not cu.get("is_desc"):
-                            continue
                         try:
                             fetch_result = detail_tab.evaluate("""
                             async (url) => {
                                 try {
                                     const resp = await fetch(url);
                                     let body = await resp.text();
-
-                                    // Handle JSON responses (moduleanalysis API returns {data: {id: "html..."}})
                                     let html = body;
                                     if (body.trim().startsWith('{')) {
                                         try {
                                             const j = JSON.parse(body);
-                                            // moduleanalysis format: {data: {moduleId: "html content"}}
                                             if (j.data && typeof j.data === 'object') {
-                                                const values = Object.values(j.data);
-                                                for (const v of values) {
-                                                    if (typeof v === 'string' && v.length > 50) {
-                                                        html = v;
-                                                        break;
-                                                    }
+                                                for (const v of Object.values(j.data)) {
+                                                    if (typeof v === 'string' && v.length > 50) { html = v; break; }
                                                 }
-                                            }
-                                            // Other JSON formats
-                                            if (html === body) {
-                                                html = j.data?.description || j.data?.content ||
-                                                       j.description || j.content || j.result || body;
-                                                if (typeof html !== 'string') html = body;
                                             }
                                         } catch(e) {}
                                     }
-
                                     const tmp = document.createElement('div');
                                     tmp.innerHTML = html;
-                                    // Get first description image
                                     let firstImg = '';
                                     tmp.querySelectorAll('img').forEach(img => {
                                         if (firstImg) return;
                                         const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                        if (src && src.includes('alicdn') && !src.includes('icon')
-                                            && !src.includes('logo') && !src.includes('thumbnail')) {
-                                            firstImg = src;
-                                        }
+                                        if (src && (src.includes('alicdn') || src.includes('ae01'))
+                                            && !src.includes('icon') && !src.includes('logo')) firstImg = src;
                                     });
-                                    // Also check for img src in raw HTML
-                                    if (!firstImg) {
-                                        const imgMatch = html.match(/src=['"]?(https?:\/\/[^'"\\s>]+(?:alicdn|ae01|ae04)[^'"\\s>]*\\.(?:jpg|png|jpeg|webp))/i);
-                                        if (imgMatch) firstImg = imgMatch[1];
-                                    }
                                     tmp.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
                                     let text = tmp.innerText.trim();
-                                    // Reject JavaScript code
-                                    if (/^\s*(\/\*|!function|\(function|function\s*\()/.test(text))
-                                        return '';
+                                    if (/^\s*(\/\*|!function|\(function)/.test(text)) return '';
                                     for (const cut of ['additional regulatory', 'regulatory information']) {
                                         const idx = text.toLowerCase().indexOf(cut);
                                         if (idx > 0) { text = text.substring(0, idx).trim(); break; }
                                     }
                                     if (text.length < 50 && !firstImg) return '';
-                                    return JSON.stringify({text: text.substring(0, 3000), img: firstImg, htmlLen: html.length});
+                                    return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
                                 } catch(e) { return ''; }
                             }
-                            """, cu["url"]) or ""
+                            """, cap_url) or ""
                             if fetch_result:
-                                import json as _json4
-                                parsed = _json4.loads(fetch_result)
-                                t = parsed.get("text", "")
-                                img = parsed.get("img", "")
-                                # Python-side safety: if JS didn't parse the JSON, do it here
-                                if t and t.lstrip().startswith("{"):
-                                    try:
-                                        j = _json4.loads(t)
-                                        if isinstance(j.get("data"), dict):
-                                            for v in j["data"].values():
-                                                if isinstance(v, str) and len(v) > 50:
-                                                    # Parse HTML from the extracted value
-                                                    import re as _re2
-                                                    clean = _re2.sub(r'<[^>]+>', ' ', v)
-                                                    clean = _re2.sub(r'\s+', ' ', clean).strip()
-                                                    t = clean[:3000]
-                                                    # Extract first image from HTML
-                                                    if not img:
-                                                        img_m = _re2.search(r'src=["\']?(https?://[^"\'>\s]+(?:alicdn|ae01|ae04)[^"\'>\s]*\.(?:jpg|png|jpeg|webp))', v, _re2.IGNORECASE)
-                                                        if img_m:
-                                                            img = img_m.group(1)
-                                                    break
-                                    except Exception:
-                                        pass
-                                # Reject JavaScript code
-                                if t and (t.lstrip().startswith("/*") or t.lstrip().startswith("!function")):
-                                    t = ""
-                                log.info("      Desc fetched: %d chars text, img=%s, htmlLen=%d",
-                                         len(t), bool(img), parsed.get("htmlLen", 0))
+                                import json as _json_cap
+                                parsed_cap = _json_cap.loads(fetch_result)
+                                t = (parsed_cap.get("text") or "").strip()
+                                img = parsed_cap.get("img", "")
                                 if t and len(t) >= 50:
                                     desc_text = t
-                                if img and not desc_img:
-                                    desc_img = img
+                                    log.info("      Desc: got %d chars from network capture (%s)", len(desc_text), cap_url[:60])
+                                if img and img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                    result["all_images"].append(img)
+                                    log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
                         except Exception:
                             pass
 
-                    # If no network capture worked, try ALL frames (desc is often in an iframe)
+                    # Try 2: Read from iframes (description loads in an iframe)
                     if not desc_text:
-                        frame_urls = [(f.url or "")[:80] for f in detail_tab.frames if f != detail_tab.main_frame]
-                        log.info("      Desc: checking %d frames: %s", len(frame_urls), str(frame_urls)[:300])
                         for frame in detail_tab.frames:
                             if frame == detail_tab.main_frame:
                                 continue
                             frame_url = (frame.url or "").lower()
-                            # Skip known non-description frames
-                            if any(skip in frame_url for skip in ["wp.html", "store-proxy", "captcha", "recaptcha", "about:blank", "chrome-error"]):
+                            if any(skip in frame_url for skip in ["wp.html", "store-proxy", "about:blank",
+                                    "chrome-error", "criteo", "google", "facebook"]):
                                 continue
                             try:
-                                body_len = frame.evaluate("() => (document.body ? document.body.innerHTML.length : 0)")
-                                if body_len > 100:
-                                    frame_result = frame.evaluate("""
-                                    () => {
-                                        if (!document.body) return '';
-                                        let text = document.body.innerText.trim();
-                                        // Reject JavaScript code
-                                        if (/^\s*(\/\*|!function|\(function|function\s*\()/.test(text))
-                                            return '';
-                                        for (const cut of ['additional regulatory', 'regulatory information']) {
-                                            const idx = text.toLowerCase().indexOf(cut);
-                                            if (idx > 0) { text = text.substring(0, idx).trim(); break; }
-                                        }
-                                        let firstImg = '';
-                                        document.querySelectorAll('img').forEach(img => {
-                                            if (firstImg) return;
-                                            const src = img.src || img.getAttribute('data-src') || '';
-                                            if (src && src.includes('alicdn') && !src.includes('icon')
-                                                && !src.includes('logo') && !src.includes('thumbnail')) {
-                                                firstImg = src;
-                                            }
-                                        });
-                                        if (text.length < 50 && !firstImg) return '';
-                                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                frame_result = frame.evaluate("""
+                                () => {
+                                    if (!document.body) return '';
+                                    let text = document.body.innerText.trim();
+                                    if (/^\s*(\/\*|!function|\(function|function\s*\()/.test(text)) return '';
+                                    if (text.length < 50) return '';
+                                    for (const cut of ['additional regulatory', 'regulatory information']) {
+                                        const idx = text.toLowerCase().indexOf(cut);
+                                        if (idx > 0) { text = text.substring(0, idx).trim(); break; }
                                     }
-                                    """) or ""
-                                    if frame_result:
-                                        import json as _json5
-                                        parsed = _json5.loads(frame_result)
-                                        t = parsed.get("text", "")
-                                        img = parsed.get("img", "")
-                                        # Python-side: reject JS code that JS filter missed
-                                        if t and (t.lstrip().startswith("/*") or t.lstrip().startswith("!function") or "function(e){" in t[:100]):
-                                            t = ""
-                                        if t and len(t) >= 50:
-                                            desc_text = t
-                                            log.info("      Desc: got %d chars from frame %s", len(t), (frame.url or "")[:60])
-                                        if img and not desc_img:
-                                            desc_img = img
+                                    let firstImg = '';
+                                    document.querySelectorAll('img').forEach(img => {
+                                        if (firstImg) return;
+                                        const src = img.src || img.getAttribute('data-src') || '';
+                                        if (src && (src.includes('alicdn') || src.includes('ae01'))
+                                            && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                                    });
+                                    return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                                }
+                                """) or ""
+                                if frame_result:
+                                    import json as _json_fr
+                                    parsed_fr = _json_fr.loads(frame_result)
+                                    t = (parsed_fr.get("text") or "").strip()
+                                    img = parsed_fr.get("img", "")
+                                    if t and len(t) >= 50:
+                                        desc_text = t
+                                        log.info("      Desc: got %d chars from iframe", len(desc_text))
+                                    if img and img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                        result["all_images"].append(img)
+                                    if desc_text:
+                                        break
                             except Exception:
                                 continue
 
-                    # If still no desc, try page text extraction (same approach as above)
-                    if not desc_text:
-                        try:
-                            main_result = detail_tab.evaluate("""
-                            () => {
-                                const fullText = document.body.innerText;
-                                let descIdx = -1;
-                                const markers = ['\\nDescription\\nreport\\n', '\\nDescription\\n'];
-                                for (const marker of markers) {
-                                    const idx = fullText.indexOf(marker);
-                                    if (idx >= 0) { descIdx = idx + marker.length; break; }
-                                }
-                                if (descIdx < 0) return '';
-                                let descContent = fullText.substring(descIdx).replace(/^report\\s*\\n?/, '');
-                                const endMarkers = ['Additional regulatory', 'Product compliance',
-                                                    '\\nSold By\\n', '\\nService commitment\\n'];
-                                for (const end of endMarkers) {
-                                    const idx = descContent.indexOf(end);
-                                    if (idx > 0) { descContent = descContent.substring(0, idx); break; }
-                                }
-                                descContent = descContent.trim();
-                                if (descContent.length < 30) return '';
-                                let firstImg = '';
-                                const snippet = descContent.substring(0, 40);
-                                const allEls = document.querySelectorAll('div, section, article, p');
-                                for (const el of allEls) {
-                                    if (el.innerText && el.innerText.includes(snippet)) {
-                                        el.querySelectorAll('img').forEach(img => {
-                                            if (firstImg) return;
-                                            const src = img.src || img.getAttribute('data-src') || '';
-                                            if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                                && !src.includes('icon') && !src.includes('logo')
-                                                && !src.includes('thumbnail') && !src.includes('avatar')
-                                                && !src.includes('flag')) firstImg = src;
-                                        });
-                                        if (firstImg) break;
-                                    }
-                                }
-                                return JSON.stringify({text: descContent.substring(0, 3000), img: firstImg});
-                            }
-                            """) or ""
-                            if main_result:
-                                import json as _json6
-                                parsed = _json6.loads(main_result)
-                                _fb = (parsed.get("text") or "").strip()
-                                _fb_bad = (_fb.startswith("View more") or _fb.startswith("Show more")
-                                           or "Buyer Questions" in _fb[:100] or "Reviews" in _fb[:50])
-                                if _fb and len(_fb) >= 30 and not _fb_bad:
-                                    desc_text = _fb
-                                    log.info("      Desc: got %d chars from page text fallback", len(desc_text))
-                                if parsed.get("img") and not desc_img:
-                                    desc_img = parsed["img"]
-                        except Exception:
-                            pass
-
-                    # Add first description image if found
-                    if desc_img and desc_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                        result["all_images"].append(desc_img)
-                        log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
-
-                    # Close any popups
-                    try:
-                        detail_tab.evaluate("""() => { document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', keyCode: 27})); }""")
-                    except Exception:
-                        pass
                 except Exception as e:
-                    log.info("      Description extraction error: %s", str(e)[:120])
+                    log.info("      Desc extraction error: %s", str(e)[:120])
 
-            # Strategy 5: Deep search of page JS globals for REAL description content
-            # Must contain HTML markup (real descriptions have <p>, <div>, <img> tags)
-            # Must be long enough to not be a title/meta description
-            if not desc_text:
-                log.info("      Desc: trying Strategy 5 (deep JS global search)...")
-                try:
-                    s5_result = detail_tab.evaluate("""
-                    () => {
-                        // Helper: validate that content is a real description, not a title/meta
-                        function extractDesc(html) {
-                            if (!html || html.length < 100) return null;
-                            // Must contain HTML tags — real descriptions have markup
-                            if (!/<[a-z][^>]*>/i.test(html)) return null;
-                            const tmp = document.createElement('div');
-                            tmp.innerHTML = html;
-                            let firstImg = '';
-                            tmp.querySelectorAll('img').forEach(img => {
-                                if (firstImg) return;
-                                const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
-                                if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                    && !src.includes('icon') && !src.includes('logo')) firstImg = src;
-                            });
-                            tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                            let text = tmp.innerText.trim();
-                            // Reject titles/meta descriptions (too short, starts with "Buy")
-                            if (text.length < 150) return null;
-                            if (/^Buy\\s/i.test(text)) return null;
-                            if (/^Smarter Shopping/i.test(text)) return null;
-                            return {text: text.substring(0, 3000), img: firstImg};
-                        }
-                        // Deep search through all script tags for description HTML
-                        const scripts = document.querySelectorAll('script');
-                        for (const s of scripts) {
-                            const t = s.textContent || '';
-                            if (t.length < 200 || t.length > 500000) continue;
-                            // Look for description HTML embedded in JSON — only keys that indicate item description
-                            const patterns = [
-                                /"(?:descriptionContent|descriptionHtml|detailDesc|descContent)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
-                                /"(?:itemDescription|product_description|descriptionModule)"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/i,
-                            ];
-                            for (const p of patterns) {
-                                const m = t.match(p);
-                                if (m && m[1] && m[1].length > 100) {
-                                    let html = m[1];
-                                    try { html = JSON.parse('"' + html + '"'); } catch(e) {}
-                                    const r = extractDesc(html);
-                                    if (r) return JSON.stringify(r);
-                                }
-                            }
-                        }
-                        // Also try window globals — but only look for actual description content keys
-                        const globals = [window.runParams, window.__INIT_DATA__,
-                            window.runConfig, window.detailData, window.pageData, window.__pageData__];
-                        function deepSearch(obj, depth) {
-                            if (!obj || depth > 6) return null;
-                            if (typeof obj === 'string' && obj.length > 200 && /<[a-z][^>]*>/i.test(obj)) {
-                                const r = extractDesc(obj);
-                                if (r) return r;
-                            }
-                            if (typeof obj !== 'object') return null;
-                            try {
-                                for (const [k, v] of Object.entries(obj)) {
-                                    const kl = k.toLowerCase();
-                                    // Skip SEO/meta/og description keys — those are titles not descriptions
-                                    if (kl.includes('og') || kl.includes('meta') || kl.includes('seo')
-                                        || kl === 'title' || kl === 'name' || kl === 'subject') continue;
-                                    if (kl.includes('desc') || kl.includes('description') || kl === 'detail'
-                                        || kl === 'descriptionmodule') {
-                                        const r = deepSearch(v, depth + 1);
-                                        if (r) return r;
-                                    }
-                                }
-                            } catch(e) {}
-                            return null;
-                        }
-                        for (const g of globals) {
-                            if (!g) continue;
-                            const r = deepSearch(g, 0);
-                            if (r) return JSON.stringify(r);
-                        }
-                        return '';
-                    }
-                    """) or ""
-                    if s5_result:
-                        import json as _json7
-                        parsed = _json7.loads(s5_result)
-                        _s5t = (parsed.get("text") or "").strip()
-                        # Python-side reject: must be 300+ chars and NOT a product title
-                        if _s5t and len(_s5t) >= 300 and not _s5t.startswith("Buy ") and not _s5t.startswith("Smarter Shopping"):
-                            desc_text = _s5t
-                            if not _store_desc_strategy:
-                                _store_desc_strategy = "s5"
-                                log.info("      Desc: CACHED Strategy 5 as working for this store (faster for remaining products)")
-                            log.info("      Desc Strategy 5: got %d chars from JS globals", len(desc_text))
-                            s5_img = parsed.get("img", "")
-                            if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                result["all_images"].append(s5_img)
-                                log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
-                        elif _s5t:
-                            log.info("      Desc Strategy 5: rejected (%d chars, starts='%s')", len(_s5t), _s5t[:40])
-                except Exception as e:
-                    log.info("      Desc Strategy 5 error: %s", str(e)[:120])
-
-            if specs_text:
-                log.info("      Specs: %s", specs_text[:120])
             if desc_text:
                 log.info("      Desc: %d chars — %s", len(desc_text), desc_text[:100])
-                _store_desc_failures = 0  # reset on success
             else:
-                _store_desc_failures += 1
-                if _store_desc_failures >= 3 and not _store_desc_strategy:
-                    _store_desc_strategy = "none"
-                    log.info("      Desc: none found (3 consecutive failures — skipping desc for remaining products in this store)")
-                else:
-                    log.info("      Desc: none found")
+                log.info("      Desc: none found")
+
 
             combined = ""
             if specs_text:
