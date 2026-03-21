@@ -1415,6 +1415,38 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 except Exception as e:
                     log.info("      Description DOM extraction error: %s", str(e)[:120])
 
+            # Always try to grab 1 description image (regardless of which strategy got text)
+            # This runs after View More may have been clicked, so desc images should be loaded
+            if len(result["all_images"]) < MAX_IMAGES:
+                try:
+                    desc_img = detail_tab.evaluate("""
+                    () => {
+                        // Look for images inside the description section
+                        const sels = ['.product-description', '.detailmodule_html',
+                            '.detail-desc-decorate-richtext', '[class*="product-description"]',
+                            '[class*="detail-desc"]'];
+                        for (const sel of sels) {
+                            const els = document.querySelectorAll(sel);
+                            for (const el of els) {
+                                const imgs = el.querySelectorAll('img');
+                                for (const img of imgs) {
+                                    const src = img.src || img.getAttribute('data-src') || '';
+                                    if (src && src.includes('alicdn') && !src.includes('icon')
+                                        && !src.includes('logo') && !src.includes('thumbnail')) {
+                                        return src.replace(/_\\d+x\\d+.*$/, '').replace(/\\.avif$/, '');
+                                    }
+                                }
+                            }
+                        }
+                        return '';
+                    }
+                    """) or ""
+                    if desc_img and desc_img not in result["all_images"]:
+                        result["all_images"].append(desc_img)
+                        log.info("      Desc: added 1 description image (total: %d)", len(result["all_images"]))
+                except Exception:
+                    pass
+
             if specs_text:
                 log.info("      Specs: %s", specs_text[:120])
             if desc_text:
