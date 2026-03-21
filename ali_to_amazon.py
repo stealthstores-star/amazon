@@ -867,18 +867,14 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
 
     try:
         # Set up early network listener to catch moduleanalysis URL during page load
-        # This is how store 1 works — we want ALL stores to work the same way
+        # Only catches analysis.json (per-store URL that works when cached)
+        # Does NOT capture desc.htm (per-product key, can't be reused)
         _early_captured_module_url = []
         def _early_on_response(response):
             try:
                 url = response.url
-                if response.status == 200:
-                    if "moduleanalysis" in url and "analysis.json" in url:
-                        _early_captured_module_url.append(url)
-                    elif "aeproductsourcesite" in url and "desc.htm" in url:
-                        _early_captured_module_url.append(url)
-                    elif "item/desc" in url.lower() and "analysis.json" in url:
-                        _early_captured_module_url.append(url)
+                if response.status == 200 and "moduleanalysis" in url and "analysis.json" in url:
+                    _early_captured_module_url.append(url)
             except Exception:
                 pass
         detail_tab.on("response", _early_on_response)
@@ -1062,101 +1058,18 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
 
             # --- DESCRIPTION EXTRACTION ---
 
-            # FIRST: If we don't have a cached moduleanalysis URL yet, scroll down
-            # to trigger lazy-loading of the description section. This fires the
-            # moduleanalysis network request on most stores — the same approach
-            # that made store 1 work perfectly.
-            if not _cached_moduleanalysis_url:
-                try:
-                    # Scroll to bottom to trigger description lazy load
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
-                    detail_tab.wait_for_timeout(500)
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.7)")
-                    detail_tab.wait_for_timeout(500)
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    detail_tab.wait_for_timeout(800)
-                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    detail_tab.wait_for_timeout(1200)
-                    # Check if the early listener caught a moduleanalysis URL
-                    if _early_captured_module_url:
-                        _url = _early_captured_module_url[0]
-                        if "desc.htm" in _url:
-                            import re as _re_early
-                            _url = _re_early.sub(r'productId=\d+', 'productId={pid}', _url)
-                        _cached_moduleanalysis_url = _url
-                        log.info("      Desc: caught desc URL during page load: %s", _cached_moduleanalysis_url[:120])
-                    else:
-                        log.info("      Desc: no desc URL captured during page load scroll")
-                except Exception:
-                    pass
-            # Remove early listener
+            # Remove early listener (no longer needed after page load)
             try:
                 detail_tab.remove_listener("response", _early_on_response)
             except Exception:
                 pass
-
-            # FAST PATH: Try simple page text extraction first — works for ALL stores
-            # The page text always has: \nDescription\n[content]\nAdditional regulatory
-            # No CSS classes, no APIs, no iframes — just text on the page
-            if not desc_text:
-                try:
-                    pt_result = detail_tab.evaluate("""
-                    () => {
-                        const fullText = document.body.innerText;
-                        let descIdx = -1;
-                        const markers = ['\\nDescription\\nreport\\n', '\\nDescription\\n'];
-                        for (const marker of markers) {
-                            const idx = fullText.indexOf(marker);
-                            if (idx >= 0) { descIdx = idx + marker.length; break; }
-                        }
-                        if (descIdx < 0) return '';
-                        let descContent = fullText.substring(descIdx).replace(/^report\\s*\\n?/, '');
-                        const endMarkers = ['Additional regulatory', 'Product compliance',
-                                            '\\nSold By\\n', '\\nService commitment\\n'];
-                        for (const end of endMarkers) {
-                            const idx = descContent.indexOf(end);
-                            if (idx > 0) { descContent = descContent.substring(0, idx); break; }
-                        }
-                        descContent = descContent.trim();
-                        if (descContent.length < 30) return '';
-                        // Find description images
-                        let firstImg = '';
-                        const snippet = descContent.substring(0, 40);
-                        const allEls = document.querySelectorAll('div, section, article, p');
-                        for (const el of allEls) {
-                            if (el.innerText && el.innerText.includes(snippet)) {
-                                el.querySelectorAll('img').forEach(img => {
-                                    if (firstImg) return;
-                                    const src = img.src || img.getAttribute('data-src') || '';
-                                    if (src && (src.includes('alicdn') || src.includes('ae01') || src.includes('ae04'))
-                                        && !src.includes('icon') && !src.includes('logo')
-                                        && !src.includes('thumbnail') && !src.includes('avatar')
-                                        && !src.includes('flag')) firstImg = src;
-                                });
-                                if (firstImg) break;
-                            }
-                        }
-                        return JSON.stringify({text: descContent.substring(0, 3000), img: firstImg});
-                    }
-                    """) or ""
-                    if pt_result:
-                        import json as _json_pt
-                        parsed_pt = _json_pt.loads(pt_result)
-                        _pt = (parsed_pt.get("text") or "").strip()
-                        # Reject if description is collapsed (starts with View more/Show more)
-                        # or if it grabbed Q&A / review content instead
-                        _pt_bad = (_pt.startswith("View more") or _pt.startswith("Show more")
-                                   or _pt.startswith("See more") or "Buyer Questions" in _pt[:100]
-                                   or "Reviews" in _pt[:50])
-                        if _pt and len(_pt) >= 30 and not _pt_bad:
-                            desc_text = _pt
-                            log.info("      Desc: got %d chars from page text (fast path)", len(desc_text))
-                            pt_img = parsed_pt.get("img", "")
-                            if pt_img and pt_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                result["all_images"].append(pt_img)
-                                log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
-                except Exception:
-                    pass
+            # If early listener caught a real moduleanalysis URL, cache it
+            if not _cached_moduleanalysis_url and _early_captured_module_url:
+                for _eu in _early_captured_module_url:
+                    if "analysis.json" in _eu:
+                        _cached_moduleanalysis_url = _eu
+                        log.info("      Desc: caught moduleanalysis URL during page load: %s", _eu[:120])
+                        break
 
             # If we already know which strategy works for this store, try it first
             # and skip slow strategies (especially Strategy 4's 2s+ wait)
@@ -1396,12 +1309,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 api_urls = []
                 # Try cached moduleanalysis URL first (same for all products in a store)
                 if _cached_moduleanalysis_url:
-                    # Substitute product ID if the cached URL has a placeholder
-                    cached_url = _cached_moduleanalysis_url
-                    if "{pid}" in cached_url:
-                        cached_url = cached_url.replace("{pid}", str(product_id))
-                    api_urls.append(cached_url)
-                    log.info("      Desc: using cached desc URL")
+                    api_urls.append(_cached_moduleanalysis_url)
+                    log.info("      Desc: using cached moduleanalysis URL")
                 if module_url and module_url not in api_urls:
                     api_urls.append(module_url)
                     log.info("      Desc: found moduleanalysis URL: %s", module_url[:120])
@@ -1807,17 +1716,10 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                      cu["url"][:120], cu["status"], cu["ct"][:40], cu.get("is_desc"))
                             cu_url = cu["url"]
                             cu_status = int(cu["status"])
-                            # Cache description URL for reuse across products
-                            if cu_status == 200:
-                                if "moduleanalysis" in cu_url and "analysis.json" in cu_url:
-                                    _cached_moduleanalysis_url = cu_url
-                                    log.info("      Desc: CACHED moduleanalysis URL for store")
-                                elif "aeproductsourcesite" in cu_url and "desc.htm" in cu_url:
-                                    # Cache the desc.htm URL pattern — swap productId for other products
-                                    import re as _re_cache
-                                    base = _re_cache.sub(r'productId=\d+', 'productId={pid}', cu_url)
-                                    _cached_moduleanalysis_url = base
-                                    log.info("      Desc: CACHED desc.htm URL pattern for store")
+                            # Cache moduleanalysis URL for reuse across products (per-store, reusable)
+                            if cu_status == 200 and "moduleanalysis" in cu_url and "analysis.json" in cu_url:
+                                _cached_moduleanalysis_url = cu_url
+                                log.info("      Desc: CACHED moduleanalysis URL for store")
 
                     # Try to fetch each captured URL for description content
                     # Only try desc-related URLs, skip recommendation/analytics garbage
