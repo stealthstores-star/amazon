@@ -505,6 +505,9 @@ DETAIL_EXTRACT_JS = """
         if (!src) return;
         if (src.includes('placeholder') || src.includes('48x48') || src.includes('avatar')
             || src.includes('icon') || src.includes('logo') || src.includes('flag-icon')) return;
+        // Filter out tiny images with dimensions in path (e.g. /116x64.png)
+        const tinyMatch = src.match(/\\/(\d+)x(\d+)\\.(?:png|jpg|jpeg|webp|gif)/i);
+        if (tinyMatch && (parseInt(tinyMatch[1]) < 200 || parseInt(tinyMatch[2]) < 200)) return;
         if (!src.includes('alicdn.com') && !src.includes('ae01.') && !src.includes('ae04.')) return;
         // Deduplicate by the core filename (ignore size suffixes)
         const key = src.replace(/https?:\\/\\/[^/]+/, '').replace(/_\\d+x\\d+/g, '');
