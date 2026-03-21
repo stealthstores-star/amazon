@@ -1082,13 +1082,60 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         _cached_moduleanalysis_url = _eu
                     break
 
-            # If we have a cached moduleanalysis URL (store type 1), use it
+            # If we have a cached moduleanalysis URL (store type 1), fetch it directly
             if not _desc_url_to_fetch and _cached_moduleanalysis_url:
                 _desc_url_to_fetch = _cached_moduleanalysis_url
 
-            # If we have a URL, fetch it
-            if _desc_url_to_fetch:
-                log.info("      Desc: fetching captured URL: %s", _desc_url_to_fetch[:80])
+            # If early listener caught a desc.htm URL, read from the IFRAME
+            # (fetch() fails cross-origin, but the iframe already has the content)
+            if _desc_url_to_fetch and "aeproductsourcesite" in _desc_url_to_fetch:
+                log.info("      Desc: reading iframe for desc.htm...")
+                for frame in detail_tab.frames:
+                    if frame == detail_tab.main_frame:
+                        continue
+                    fu = (frame.url or "")
+                    if "aeproductsourcesite" not in fu:
+                        continue
+                    try:
+                        fr = frame.evaluate("""
+                        () => {
+                            if (!document.body || document.body.innerText.trim().length < 50) return '';
+                            let text = document.body.innerText.trim();
+                            if (/^\\s*(\\/\\*|!function|\\(function|with\\(|var |let |const |function )/.test(text)) return '';
+                            for (const cut of ['additional regulatory', 'regulatory information']) {
+                                const idx = text.toLowerCase().indexOf(cut);
+                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                            }
+                            let firstImg = '';
+                            document.querySelectorAll('img').forEach(img => {
+                                if (firstImg) return;
+                                const src = img.src || img.getAttribute('data-src') || img.getAttribute('src') || '';
+                                if (src && (src.includes('alicdn') || src.includes('ae01'))
+                                    && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                            });
+                            if (text.length < 50 && !firstImg) return '';
+                            return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                        }
+                        """) or ""
+                        if fr:
+                            import json as _json_ifr
+                            pfr = _json_ifr.loads(fr)
+                            t = (pfr.get("text") or "").strip()
+                            img = pfr.get("img", "")
+                            if t and len(t) >= 50:
+                                desc_text = t
+                                log.info("      Desc: got %d chars from desc iframe", len(desc_text))
+                            if img and img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                result["all_images"].append(img)
+                                log.info("      Desc: added description image (total: %d)", len(result["all_images"]))
+                            if desc_text:
+                                break
+                    except Exception:
+                        continue
+
+            # If we have a moduleanalysis URL (not desc.htm), fetch it via API
+            elif _desc_url_to_fetch:
+                log.info("      Desc: fetching moduleanalysis URL: %s", _desc_url_to_fetch[:80])
                 try:
                     desc_result = detail_tab.evaluate("""
                     async (url) => {
@@ -1119,7 +1166,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             });
                             tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
                             let text = tmp.innerText.trim();
-                            if (/^\s*(\/\*|!function|\(function|with\(|var |let |const |function )/.test(text)) return '';
+                            if (/^\\s*(\\/\\*|!function|\\(function|with\\(|var |let |const |function )/.test(text)) return '';
                             for (const cut of ['additional regulatory', 'regulatory information']) {
                                 const idx = text.toLowerCase().indexOf(cut);
                                 if (idx > 0) { text = text.substring(0, idx).trim(); break; }
@@ -1135,7 +1182,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         desc_text = (parsed_d.get("text") or "").strip()
                         d_img = parsed_d.get("img", "")
                         if desc_text:
-                            log.info("      Desc: got %d chars from URL fetch", len(desc_text))
+                            log.info("      Desc: got %d chars from moduleanalysis fetch", len(desc_text))
                         if d_img and d_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
                             result["all_images"].append(d_img)
                             log.info("      Desc: added description image (total: %d)", len(result["all_images"]))
