@@ -1316,9 +1316,30 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         """)
                         if clicked_vm:
                             log.info("      Desc: clicked '%s'", str(clicked_vm)[:60])
-                        detail_tab.wait_for_timeout(2000)
+                        detail_tab.wait_for_timeout(1000)
                     except Exception:
                         pass
+
+                    # Wait for description content to actually load (poll up to 5 seconds)
+                    for _poll in range(5):
+                        has_content = detail_tab.evaluate("""
+                        () => {
+                            const sels = ['.product-description', '.detailmodule_html',
+                                '[class*="product-description"]', '[class*="detail-desc"]'];
+                            for (const sel of sels) {
+                                const els = document.querySelectorAll(sel);
+                                for (const el of els) {
+                                    if (el.innerText && el.innerText.trim().length > 50) return true;
+                                    if (el.querySelectorAll('img').length > 0) return true;
+                                }
+                            }
+                            return false;
+                        }
+                        """)
+                        if has_content:
+                            log.info("      Desc: content loaded after %d polls", _poll + 1)
+                            break
+                        detail_tab.wait_for_timeout(1000)
 
                     # Extract text and images from the now-expanded description
                     desc_result = detail_tab.evaluate("""
