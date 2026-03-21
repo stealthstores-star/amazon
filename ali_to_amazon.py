@@ -1264,13 +1264,12 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             log.info("      Desc Strategy 2: selector '%s', %d chars text, %d desc images",
                                      parsed.get("sel", "?"), len(desc_text), len(desc_imgs))
                             # Add description images to product images if we don't have enough
+                            # Only take the 1st description image
                             if desc_imgs and len(result["all_images"]) < MAX_IMAGES:
-                                for img_url in desc_imgs:
-                                    if img_url not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                        result["all_images"].append(img_url)
-                                if desc_imgs:
-                                    log.info("      Desc: added %d description images (total now: %d)",
-                                             len(desc_imgs), len(result["all_images"]))
+                                if desc_imgs[0] not in result["all_images"]:
+                                    result["all_images"].append(desc_imgs[0])
+                                    log.info("      Desc: added 1st description image (total now: %d)",
+                                             len(result["all_images"]))
                         except Exception:
                             pass
                 except Exception as e:
