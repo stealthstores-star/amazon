@@ -1129,31 +1129,37 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Step 3: Click "View more" button to expand description
+                    # Step 3: Click "View more" only if it's inside the description section
                     try:
                         clicked_vm = detail_tab.evaluate("""
                         () => {
-                            // Find and click "View more" button near description
-                            const buttons = document.querySelectorAll(
-                                'button, [class*="view-more"], [class*="viewMore"], [class*="ViewMore"], ' +
-                                '[class*="expand"], [class*="Expand"], a[class*="more"]'
+                            // First find the description section container
+                            const descSection = document.querySelector(
+                                '[class*="description--wrap"], [class*="description--store"], ' +
+                                '[class*="product-description"], [class*="ProductDescription"]'
                             );
-                            for (const btn of buttons) {
+                            if (!descSection) return false;
+
+                            // Only look for "View more" within or near the description section
+                            const candidates = descSection.querySelectorAll('button, span, div, a');
+                            for (const btn of candidates) {
+                                if (btn.children.length > 3) continue;
                                 const text = (btn.innerText || '').trim().toLowerCase();
                                 if (text === 'view more' || text === 'show more' || text === 'see more') {
                                     btn.click();
                                     return text;
                                 }
                             }
-                            // Also try generic text matching
-                            const allEls = document.querySelectorAll('span, div, a, button');
-                            for (const el of allEls) {
-                                if (el.children.length > 2) continue;  // skip containers
-                                const text = (el.innerText || '').trim().toLowerCase();
+
+                            // Also check the next sibling of the description section
+                            let sibling = descSection.nextElementSibling;
+                            for (let i = 0; i < 3 && sibling; i++) {
+                                const text = (sibling.innerText || '').trim().toLowerCase();
                                 if (text === 'view more') {
-                                    el.click();
-                                    return 'view more (generic)';
+                                    sibling.click();
+                                    return 'view more (sibling)';
                                 }
+                                sibling = sibling.nextElementSibling;
                             }
                             return false;
                         }
@@ -1272,6 +1278,26 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                              len(result["all_images"]))
                         except Exception:
                             pass
+                    # Close any popups that may have opened (e.g. reviews popup)
+                    try:
+                        detail_tab.evaluate("""
+                        () => {
+                            // Close modal/popup overlays
+                            const closeBtns = document.querySelectorAll(
+                                '[class*="close"], [class*="Close"], [aria-label="close"], [aria-label="Close"]'
+                            );
+                            for (const btn of closeBtns) {
+                                const rect = btn.getBoundingClientRect();
+                                if (rect.width > 0 && rect.width < 60) {
+                                    try { btn.click(); } catch(e) {}
+                                }
+                            }
+                            // Press Escape to close any modal
+                            document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', keyCode: 27}));
+                        }
+                        """)
+                    except Exception:
+                        pass
                 except Exception as e:
                     log.info("      Description DOM extraction error: %s", str(e)[:120])
 
@@ -1308,7 +1334,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
                                 let text = tmp.innerText.trim();
                                 // Reject 404 pages and garbage
-                                if (text.includes('404') && text.length < 500) return '';
+                                if (text.includes('404') || text.includes("can't find") || text.includes('Sorry')) return '';
                                 if (text.length >= 50) return text.substring(0, 3000);
                                 return '';
                             } catch(e) { return ''; }
