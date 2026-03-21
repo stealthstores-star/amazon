@@ -682,7 +682,6 @@ DETAIL_EXTRACT_JS = """
         }
     }
     // Strategy 3: removed — JSON "description" field is just the SEO meta title, not useful
-    }
 
     // Get price — try multiple strategies
     // Strategy 1: CSS selectors for known price elements
