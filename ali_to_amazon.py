@@ -55,7 +55,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
-PARALLEL_TABS = 2               # Parallel detail tabs — 2 is safer to avoid CAPTCHAs
+PARALLEL_TABS = 1               # Sequential detail scraping — more reliable, avoids CAPTCHAs
 
 # Proxy pool disabled — cheap datacenter proxies trigger more CAPTCHAs than
 # browsing direct from a residential IP.  Keep the list empty so proxy code
@@ -882,70 +882,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         # Dismiss any popups
         dismiss_popups(detail_tab)
 
-        # Scroll down to the description/tabs section and click "Description" tab
-        try:
-            detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.4)")
-            detail_tab.wait_for_timeout(500)
-        except Exception:
-            pass
-        # Click "Description" tab — AliExpress shows reviews by default
-        try:
-            desc_clicked = detail_tab.evaluate("""
-            () => {
-                // Find tab navigation items
-                const tabSels = [
-                    '[class*="tab"] a', '[class*="tab"] span', '[class*="tab"] div',
-                    '[class*="Tab"] a', '[class*="Tab"] span',
-                    '[role="tab"]', '[class*="nav-item"]',
-                    'div[class*="product-detail"] a',
-                ];
-                for (const sel of tabSels) {
-                    const tabs = document.querySelectorAll(sel);
-                    for (const tab of tabs) {
-                        const text = (tab.innerText || tab.textContent || '').trim().toLowerCase();
-                        if (text === 'description' || text === 'descriptions'
-                            || text === 'product description') {
-                            tab.scrollIntoView({block: 'center'});
-                            tab.click();
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-            """)
-            if desc_clicked:
-                detail_tab.wait_for_timeout(1000)
-        except Exception:
-            pass
-
-        # Click "Show more" / "View more" to expand truncated description
-        try:
-            detail_tab.evaluate("""
-            () => {
-                const btns = document.querySelectorAll(
-                    '[class*="show-more"], [class*="view-more"], [class*="showMore"], [class*="viewMore"]'
-                );
-                for (const btn of btns) {
-                    if (btn.offsetParent !== null) { btn.click(); return true; }
-                }
-                // Also try text-based matching
-                const allBtns = document.querySelectorAll('button, a, span[role="button"]');
-                for (const btn of allBtns) {
-                    const t = (btn.innerText || '').trim().toLowerCase();
-                    if ((t === 'show more' || t === 'view more' || t === 'read more')
-                        && btn.offsetParent !== null) {
-                        btn.click();
-                        return true;
-                    }
-                }
-                return false;
-            }
-            """)
-            detail_tab.wait_for_timeout(500)
-        except Exception:
-            pass
-
+        # --- STEP 1: Extract images, title, price, variations, shipping from TOP of page ---
         data = detail_tab.evaluate(DETAIL_EXTRACT_JS)
 
         if data.get("images"):
@@ -961,36 +898,108 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         if data.get("description"):
             result["detail_description"] = data["description"]
 
-        # If we only got 1 image or no description, scroll further and retry
-        if len(result["all_images"]) <= 1 or not result["detail_description"]:
+        # If we only got 1 image, scroll a bit and retry image extraction
+        if len(result["all_images"]) <= 1:
             try:
-                detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
-                detail_tab.wait_for_timeout(1000)
-                # Try clicking description tab again in case first attempt failed
-                try:
-                    detail_tab.evaluate("""
-                    () => {
-                        const tabs = document.querySelectorAll('[class*="tab"] a, [class*="tab"] span, [role="tab"], [class*="Tab"] span');
-                        for (const tab of tabs) {
-                            const t = (tab.innerText || '').trim().toLowerCase();
-                            if (t === 'description' || t === 'descriptions') { tab.click(); return true; }
-                        }
-                        return false;
-                    }
-                    """)
-                    detail_tab.wait_for_timeout(800)
-                except Exception:
-                    pass
+                detail_tab.evaluate("window.scrollTo(0, 300)")
+                detail_tab.wait_for_timeout(800)
                 data2 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
                 if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
                     result["all_images"] = data2["images"][:MAX_IMAGES]
-                if data2.get("description") and len(data2.get("description", "")) > len(result["detail_description"]):
-                    result["detail_description"] = data2["description"]
             except Exception:
                 pass
 
+        # --- STEP 2: Scroll down to description section and extract it ---
+        try:
+            # Scroll to the tabs area (typically around 60% of the page)
+            detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
+            detail_tab.wait_for_timeout(1000)
+
+            # Click "Description" tab — AliExpress defaults to reviews
+            desc_clicked = detail_tab.evaluate("""
+            () => {
+                // Strategy 1: Find any clickable element with text "Description"
+                const allEls = document.querySelectorAll('a, span, div, button, li');
+                for (const el of allEls) {
+                    const text = (el.innerText || el.textContent || '').trim();
+                    const lower = text.toLowerCase();
+                    // Must be a short label, not a long paragraph
+                    if (text.length < 30 && (lower === 'description' || lower === 'descriptions'
+                        || lower === 'product description')) {
+                        if (el.offsetParent !== null) {
+                            el.scrollIntoView({block: 'center'});
+                            el.click();
+                            return 'clicked: ' + text;
+                        }
+                    }
+                }
+                // Strategy 2: Tab-specific selectors
+                const tabSels = [
+                    '[role="tab"]', '[class*="tab"]', '[class*="Tab"]',
+                    '[class*="nav-item"]', '[class*="nav-link"]',
+                ];
+                for (const sel of tabSels) {
+                    const tabs = document.querySelectorAll(sel);
+                    for (const tab of tabs) {
+                        const text = (tab.innerText || tab.textContent || '').trim();
+                        const lower = text.toLowerCase();
+                        if (lower.includes('description') && text.length < 40) {
+                            if (tab.offsetParent !== null) {
+                                tab.scrollIntoView({block: 'center'});
+                                tab.click();
+                                return 'clicked tab: ' + text;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+            """)
+            if desc_clicked:
+                log.info("      Description tab: %s", desc_clicked)
+                detail_tab.wait_for_timeout(1500)
+            else:
+                log.debug("      Description tab not found")
+
+            # Click "Show more" / "View more" to expand truncated content
+            detail_tab.evaluate("""
+            () => {
+                const btns = document.querySelectorAll(
+                    '[class*="show-more"], [class*="view-more"], [class*="showMore"], [class*="viewMore"]'
+                );
+                for (const btn of btns) {
+                    if (btn.offsetParent !== null) { btn.click(); return true; }
+                }
+                const allBtns = document.querySelectorAll('button, a, span[role="button"]');
+                for (const btn of allBtns) {
+                    const t = (btn.innerText || '').trim().toLowerCase();
+                    if ((t === 'show more' || t === 'view more' || t === 'read more')
+                        && btn.offsetParent !== null) {
+                        btn.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """)
+            detail_tab.wait_for_timeout(800)
+
+            # Now re-extract to get the description content
+            data3 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
+            if data3.get("description") and len(data3.get("description", "")) > len(result["detail_description"]):
+                result["detail_description"] = data3["description"]
+        except Exception as e:
+            log.debug("      Description extraction error: %s", str(e)[:80])
+
     except Exception as e:
         log.debug("  Detail scrape failed for %s: %s", product_id, str(e)[:80])
+
+    # Log what we got
+    log.info("      Got: %d images, %s price, %s shipping, %d char desc",
+             len(result["all_images"]),
+             result["detail_price"][:20] if result["detail_price"] else "none",
+             result["detail_shipping"][:20] if result["detail_shipping"] else "none",
+             len(result["detail_description"]))
 
     return result
 
