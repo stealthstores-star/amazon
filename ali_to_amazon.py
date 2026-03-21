@@ -26,7 +26,7 @@ import re
 import signal
 import subprocess
 import sys
-import threading as _threading
+import base64
 import time
 from datetime import datetime
 from io import BytesIO
@@ -2024,92 +2024,34 @@ def _is_thumbnail_url(url):
     return False
 
 
-def _upload_to_catbox(jpeg_bytes):
-    """Upload JPEG bytes to catbox.moe. Returns direct URL or None."""
+def _upload_to_imgbb(jpeg_bytes):
+    """Upload JPEG bytes to imgbb. Returns URL or None."""
     try:
-        resp = http_requests.post(
-            "https://catbox.moe/user/api.php",
-            data={"reqtype": "fileupload"},
-            files={"fileToUpload": ("image.jpg", jpeg_bytes, "image/jpeg")},
-            timeout=15,
-        )
-        if resp.status_code == 200 and resp.text.startswith("https://"):
-            return resp.text.strip()
-        log.info(f"          [IMG] catbox response: {resp.status_code}")
-    except Exception as e:
-        log.info(f"          [IMG] catbox error: {e}")
-    return None
-
-
-def _upload_to_litterbox(jpeg_bytes):
-    """Upload JPEG bytes to litterbox.catbox.moe (temp hosting). Returns direct URL or None."""
-    try:
-        resp = http_requests.post(
-            "https://litterbox.catbox.moe/resources/internals/api.php",
-            data={"reqtype": "fileupload", "time": "72h"},
-            files={"fileToUpload": ("image.jpg", jpeg_bytes, "image/jpeg")},
-            timeout=15,
-        )
-        if resp.status_code == 200 and resp.text.startswith("https://"):
-            return resp.text.strip()
-        log.info(f"          [IMG] litterbox response: {resp.status_code}")
-    except Exception as e:
-        log.info(f"          [IMG] litterbox error: {e}")
-    return None
-
-
-def _verify_hosted_image(url):
-    """HEAD-check a hosted image URL to confirm it's accessible."""
-    try:
-        resp = http_requests.head(url, timeout=10, allow_redirects=True)
-        if resp.status_code == 200:
-            return True
-        # Some CDNs return 301/302 — accept redirects as valid
-        if resp.status_code in (301, 302):
-            return True
-        log.info(f"          [IMG] Verify failed: status={resp.status_code} url={url[:80]}")
-    except Exception as e:
-        log.info(f"          [IMG] Verify error: {e} url={url[:80]}")
-    return False
-
-
-def _upload_to_imgur(jpeg_bytes):
-    """Upload JPEG bytes to Imgur (anonymous). Returns direct URL or None."""
-    try:
-        import base64
         b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
         resp = http_requests.post(
-            "https://api.imgur.com/3/image",
-            headers={"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"},
-            data={"image": b64, "type": "base64"},
+            "https://api.imgbb.com/1/upload",
+            data={"key": IMGBB_API_KEY, "image": b64},
             timeout=30,
         )
         if resp.status_code == 200:
             data = resp.json()
-            link = data.get("data", {}).get("link", "")
-            if link:
-                # Ensure HTTPS
-                link = link.replace("http://", "https://")
-                return link
-        log.info(f"          [IMG] Imgur response: {resp.status_code} {resp.text[:200]}")
-    except Exception as e:
-        log.info(f"          [IMG] Imgur error: {e}")
+            img_data = data.get("data", {})
+            url = (img_data.get("image", {}).get("url", "")
+                   or img_data.get("display_url", "")
+                   or img_data.get("url", ""))
+            if url:
+                return url
+    except Exception:
+        pass
     return None
 
-
-_freeimage_lock = _threading.Lock()
-_freeimage_last_call = 0.0
-
 def _upload_to_freeimage(jpeg_bytes):
-    """Upload JPEG bytes to freeimage.host (iili.io CDN). Returns direct URL or None."""
-    global _freeimage_last_call
-    FREEIMAGE_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
+    """Upload JPEG bytes to freeimage.host. Returns URL or None."""
     try:
-        import base64
         b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
         resp = http_requests.post(
             "https://freeimage.host/api/1/upload",
-            data={"key": FREEIMAGE_API_KEY, "source": b64, "format": "json"},
+            data={"key": "6d207e02198a847aa98d0a2a901485a5", "source": b64, "format": "json"},
             timeout=30,
         )
         if resp.status_code == 200:
@@ -2117,53 +2059,28 @@ def _upload_to_freeimage(jpeg_bytes):
             url = data.get("image", {}).get("url", "")
             if url:
                 return url
-        log.info(f"          [IMG] freeimage response: {resp.status_code}")
-    except Exception as e:
-        log.info(f"          [IMG] freeimage error: {e}")
+    except Exception:
+        pass
     return None
 
-
-def _upload_to_imgbb_with_retry(jpeg_bytes, max_retries=3):
-    """Upload to imgbb with retry + exponential backoff on rate limits. Returns URL or None."""
-    import base64
-    b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
-    for attempt in range(max_retries):
-        try:
-            resp = http_requests.post(
-                "https://api.imgbb.com/1/upload",
-                data={"key": IMGBB_API_KEY, "image": b64},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                img_data = data.get("data", {})
-                url = (img_data.get("image", {}).get("url", "")
-                       or img_data.get("display_url", "")
-                       or img_data.get("url", ""))
-                if url and _verify_hosted_image(url):
-                    return url
-                elif url:
-                    log.warning(f"          [IMG] imgbb uploaded but not accessible: {url}")
-                    return None
-            elif resp.status_code == 400 and "rate limit" in resp.text.lower():
-                wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                log.info(f"          [IMG] imgbb rate-limited, retrying in {wait}s (attempt {attempt+1}/{max_retries})...")
-                time.sleep(wait)
-                continue
-            else:
-                log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
-                return None
-        except Exception as e:
-            log.info(f"          [IMG] imgbb error: {e}")
-            return None
-    # All retries exhausted — mark imgbb as skipped for remaining images
-    log.warning("          [IMG] imgbb rate-limited after retries — skipping for remaining images")
-    global _imgbb_skip
-    _imgbb_skip = True
+def _upload_to_imgur(jpeg_bytes):
+    """Upload JPEG bytes to Imgur. Returns URL or None."""
+    try:
+        b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+        resp = http_requests.post(
+            "https://api.imgur.com/3/image",
+            headers={"Authorization": "Client-ID 546c25a59c58ad7"},
+            data={"image": b64, "type": "base64"},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            link = data.get("data", {}).get("link", "")
+            if link:
+                return link.replace("http://", "https://")
+    except Exception:
+        pass
     return None
-
-_imgbb_lock = _threading.Lock()
-_imgbb_skip = False
 
 def rehost_image(img_url):
     """Download image, convert to JPEG, upload to hosting. Returns URL for Amazon."""
@@ -2176,7 +2093,6 @@ def rehost_image(img_url):
 
     # Skip tiny thumbnails/swatches — Amazon requires min 1000px
     if _is_thumbnail_url(img_url):
-        log.info(f"          [IMG] Skipping thumbnail: {img_url}")
         return "SKIPPED"
 
     # Strip AliExpress resize suffixes to get full-size image
@@ -2194,51 +2110,22 @@ def rehost_image(img_url):
         return None
 
     _save_image_locally(jpeg_bytes, img_url)
-    log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
-    # Try freeimage.host first (best rate limits for bulk uploads)
-    if getattr(rehost_image, '_freeimage_fails', 0) < 10:
-        hosted_url = _upload_to_freeimage(jpeg_bytes)
-        if hosted_url and _verify_hosted_image(hosted_url):
-            log.info(f"          [IMG] freeimage (iili.io): {hosted_url}")
-            rehost_image._freeimage_fails = 0
-            return hosted_url
-        rehost_image._freeimage_fails = getattr(rehost_image, '_freeimage_fails', 0) + 1
-        if rehost_image._freeimage_fails >= 10:
-            log.warning("          [IMG] freeimage rate-limited — skipping for remaining images")
+    # Try imgbb first
+    url = _upload_to_imgbb(jpeg_bytes)
+    if url:
+        return url
 
-    # Try imgbb (serialize to avoid concurrent rate limits)
-    if not _imgbb_skip:
-        with _imgbb_lock:
-            result = _upload_to_imgbb_with_retry(jpeg_bytes)
-            if result:
-                log.info(f"          [IMG] imgbb: {result}")
-                return result
+    # Try freeimage
+    url = _upload_to_freeimage(jpeg_bytes)
+    if url:
+        return url
 
-    # Try Imgur as fallback
-    if getattr(rehost_image, '_imgur_fails', 0) < 5:
-        hosted_url = _upload_to_imgur(jpeg_bytes)
-        if hosted_url and _verify_hosted_image(hosted_url):
-            log.info(f"          [IMG] Imgur: {hosted_url}")
-            rehost_image._imgur_fails = 0
-            return hosted_url
-        rehost_image._imgur_fails = getattr(rehost_image, '_imgur_fails', 0) + 1
-        if rehost_image._imgur_fails >= 5:
-            log.warning("          [IMG] Imgur rate-limited — skipping for remaining images")
+    # Try imgur
+    url = _upload_to_imgur(jpeg_bytes)
+    if url:
+        return url
 
-    # Try catbox as last resort
-    hosted_url = _upload_to_catbox(jpeg_bytes)
-    if hosted_url and _verify_hosted_image(hosted_url):
-        log.info(f"          [IMG] catbox: {hosted_url}")
-        return hosted_url
-
-    # Try litterbox as absolute last resort
-    hosted_url = _upload_to_litterbox(jpeg_bytes)
-    if hosted_url and _verify_hosted_image(hosted_url):
-        log.info(f"          [IMG] litterbox: {hosted_url}")
-        return hosted_url
-
-    log.warning(f"          [IMG] All hosting failed for: {img_url[:80]}")
     return None
 
 
