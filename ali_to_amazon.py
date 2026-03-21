@@ -113,10 +113,10 @@ atexit.register(stop_proxy_forwarders)
 
 # ---- SMART PRICING CONFIG ----
 TARGET_PROFIT_MARGIN = 0.30
+MIN_PROFIT_GBP = 7.50          # Minimum £7.50 profit per item
 AMAZON_REFERRAL_FEE = 0.1545
 AMAZON_PER_ITEM_FEE = 0.75
-USD_TO_GBP = 0.79
-ALI_SHIPPING_ESTIMATE = 2.00
+USD_TO_GBP = 0.75
 MIN_SELL_PRICE = 5.99
 
 # ---- IMAGE HOSTING ----
@@ -484,6 +484,7 @@ DETAIL_EXTRACT_JS = """
         title: '',
         price: '',
         originalPrice: '',
+        shipping: '',
     };
 
     // Helper: clean an image URL to get full-size version
@@ -681,6 +682,76 @@ DETAIL_EXTRACT_JS = """
         } catch(e) {}
     }
 
+    // Get shipping cost (AliExpress shows shipping in user's local currency, e.g. £3.52)
+    // Strategy 1: DOM elements with shipping info
+    const shipSels = [
+        '[class*="shipping-value"]', '[class*="shipping-price"]',
+        '[class*="dynamic-shipping"] [class*="price"]',
+        '[class*="product-shipping"] [class*="price"]',
+        '[class*="delivery"] [class*="price"]',
+        '[class*="shipping-cost"]', '[data-pl="product-shipping"]',
+        '[class*="dynamic-shipping"]',
+        '[class*="service-commitment"] [class*="shipping"]',
+        '[class*="Shipping"]',
+    ];
+    for (const sel of shipSels) {
+        try {
+            const el = document.querySelector(sel);
+            if (el) {
+                const sText = el.innerText.trim();
+                const sLower = sText.toLowerCase();
+                if (sLower.includes('free')) {
+                    result.shipping = 'Free';
+                    break;
+                }
+                // Match any currency: £3.52, $2.50, €1.80, etc.
+                const sMatch = sText.match(/[£$€¥₽]\\s*([\\d,]+\\.?\\d*)/);
+                if (sMatch) {
+                    // Store as plain number — AliExpress shows in user's local currency (GBP)
+                    result.shipping = sMatch[1].replace(',', '');
+                    break;
+                }
+                // Also match "3.52" without currency symbol
+                const sMatch2 = sText.match(/(\\d+[,.]\\d{2})/);
+                if (sMatch2 && sLower.includes('ship')) {
+                    result.shipping = sMatch2[1].replace(',', '');
+                    break;
+                }
+            }
+        } catch(e) {}
+    }
+    // Strategy 2: Script/JSON data
+    if (!result.shipping) {
+        try {
+            const scripts = document.querySelectorAll('script');
+            for (const s of scripts) {
+                const t = s.textContent || '';
+                if (t.includes('freightAmount')) {
+                    const fm = t.match(/"freightAmount"\\s*:\\s*{\\s*"value"\\s*:\\s*([\\d.]+)/);
+                    if (fm) {
+                        result.shipping = parseFloat(fm[1]) === 0 ? 'Free' : fm[1];
+                        break;
+                    }
+                }
+                const freeMatch = t.match(/"isFreeship"\\s*:\\s*true/i);
+                if (freeMatch) {
+                    result.shipping = 'Free';
+                    break;
+                }
+            }
+        } catch(e) {}
+    }
+    // Strategy 3: Look for "Shipping: £X.XX" or "Free shipping" in page text
+    if (!result.shipping) {
+        const bodyText = document.body.innerText || '';
+        const shipMatch = bodyText.match(/[Ss]hipping[:\\s]*[£$€]\\s*([\\d,]+\\.\\d{2})/);
+        if (shipMatch) {
+            result.shipping = shipMatch[1].replace(',', '');
+        } else if (/free\\s+shipping/i.test(bodyText)) {
+            result.shipping = 'Free';
+        }
+    }
+
     return result;
 }
 """
@@ -696,6 +767,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         "variations": [],
         "detail_title": "",
         "detail_price": "",
+        "detail_shipping": "",
     }
 
     try:
@@ -743,6 +815,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             result["detail_title"] = data["title"]
         if data.get("price"):
             result["detail_price"] = data["price"]
+        if data.get("shipping"):
+            result["detail_shipping"] = data["shipping"]
 
         # If we only got 1 image, try scrolling and re-extracting
         if len(result["all_images"]) <= 1:
@@ -848,6 +922,7 @@ def scrape_details_parallel(context, products, main_tab):
                 "variations": [],
                 "detail_title": "",
                 "detail_price": "",
+                "detail_shipping": "",
             }
             try:
                 # Skip if still on CAPTCHA
@@ -865,6 +940,8 @@ def scrape_details_parallel(context, products, main_tab):
                     result["detail_title"] = data["title"]
                 if data.get("price"):
                     result["detail_price"] = data["price"]
+                if data.get("shipping"):
+                    result["detail_shipping"] = data["shipping"]
                 # If only 1 image, scroll and retry
                 if len(result["all_images"]) <= 1:
                     tabs[i].evaluate("window.scrollTo(0, 300)")
@@ -1656,20 +1733,39 @@ def parse_price(price_str):
         return None
 
 
-def ali_to_gbp(price_usd):
+def ali_to_gbp(price_usd, shipping_str=None):
+    """Calculate Amazon UK sell price from AliExpress cost.
+
+    Shipping is scraped from AliExpress detail pages and is already in GBP
+    (AliExpress shows shipping in the user's local currency).
+    If no shipping was scraped, assumes free shipping (0).
+
+    Ensures min 30% margin OR min £7.50 profit — whichever gives the higher price.
+    """
     if not price_usd:
         return DEFAULT_PRICE_GBP
     cost_gbp = price_usd * USD_TO_GBP
-    total_cost = cost_gbp + ALI_SHIPPING_ESTIMATE
+    # Shipping is already in GBP from AliExpress (e.g. "£3.52", "Free")
+    shipping_gbp = 0.0
+    if shipping_str:
+        s = shipping_str.lower().strip()
+        if s != "free":
+            parsed = parse_price(shipping_str)
+            if parsed is not None:
+                shipping_gbp = parsed
+    total_cost = cost_gbp + shipping_gbp + AMAZON_PER_ITEM_FEE
+    # Price for 30% margin: sell = total_cost / (1 - referral_fee - margin)
     denominator = 1 - AMAZON_REFERRAL_FEE - TARGET_PROFIT_MARGIN
     if denominator <= 0:
         return DEFAULT_PRICE_GBP
-    sell_price = (total_cost + AMAZON_PER_ITEM_FEE) / denominator
+    price_for_margin = total_cost / denominator
+    # Price for £7.50 min profit: profit = sell - sell*referral - per_item - cost - shipping
+    # profit = sell*(1-referral) - per_item - cost_gbp - shipping_gbp
+    # sell = (profit + per_item + cost_gbp + shipping_gbp) / (1 - referral)
+    price_for_min_profit = (MIN_PROFIT_GBP + AMAZON_PER_ITEM_FEE + cost_gbp + shipping_gbp) / (1 - AMAZON_REFERRAL_FEE)
+    # Use whichever gives the higher sell price
+    sell_price = max(price_for_margin, price_for_min_profit)
     sell_price = round(sell_price, 2)
-    actual_profit = sell_price - (sell_price * AMAZON_REFERRAL_FEE) - AMAZON_PER_ITEM_FEE - total_cost
-    if actual_profit < 6.0:
-        sell_price = (6.0 + AMAZON_PER_ITEM_FEE + total_cost) / (1 - AMAZON_REFERRAL_FEE)
-        sell_price = round(sell_price, 2)
     if sell_price < MIN_SELL_PRICE:
         sell_price = MIN_SELL_PRICE
     return sell_price
@@ -2138,7 +2234,8 @@ def fill_amazon_template(template_path, products):
         variation_images_raw = product.get("variation_images", "")
 
         price_usd = parse_price(price_str)
-        sell_price = ali_to_gbp(price_usd)
+        shipping_str = product.get("shipping", "")
+        sell_price = ali_to_gbp(price_usd, shipping_str=shipping_str)
         bullets = make_bullets(title)
         description = make_description(title)
 
@@ -3108,6 +3205,9 @@ def main():
                             # Fill in price from detail page when search page had N/A
                             if detail.get("detail_price") and (not product.get("product_price") or product["product_price"] == "N/A"):
                                 product["product_price"] = detail["detail_price"]
+                            # Fill in shipping cost from detail page
+                            if detail.get("detail_shipping"):
+                                product["shipping"] = detail["detail_shipping"]
 
                 prev_total = csv_out.count
                 csv_out.add(products, url)
