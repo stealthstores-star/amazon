@@ -1195,27 +1195,147 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 except Exception as e:
                     log.info("      Description DOM extraction error: %s", str(e)[:120])
 
-            # Strategy 3: Try AliExpress product description API
+            # Strategy 3: Try multiple AliExpress description API endpoints
             if not desc_text and product_id:
-                log.info("      Desc: trying Strategy 3 (API: /fn/item-description)...")
+                log.info("      Desc: trying Strategy 3 (API endpoints)...")
+                api_urls = [
+                    f"https://www.aliexpress.com/aer-api/module/item/description?productId={product_id}",
+                    f"https://www.aliexpress.com/fn/item-description/index.html?productId={product_id}",
+                    f"https://aeproductsourcesite.alicdn.com/product/description/pc/{product_id}.html",
+                ]
+                for api_url in api_urls:
+                    if desc_text:
+                        break
+                    try:
+                        desc_text = detail_tab.evaluate("""
+                        async (url) => {
+                            try {
+                                const resp = await fetch(url, {credentials: 'include'});
+                                if (!resp.ok) return '';
+                                const contentType = resp.headers.get('content-type') || '';
+                                const body = await resp.text();
+                                // If JSON response, extract HTML from it
+                                let html = body;
+                                if (contentType.includes('json') || body.trim().startsWith('{')) {
+                                    try {
+                                        const j = JSON.parse(body);
+                                        html = j.data?.description || j.data?.content || j.description || j.content || j.result || '';
+                                        if (typeof html !== 'string') html = JSON.stringify(html);
+                                    } catch(e) { html = body; }
+                                }
+                                const tmp = document.createElement('div');
+                                tmp.innerHTML = html;
+                                tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                let text = tmp.innerText.trim();
+                                // Reject 404 pages and garbage
+                                if (text.includes('404') && text.length < 500) return '';
+                                if (text.length >= 50) return text.substring(0, 3000);
+                                return '';
+                            } catch(e) { return ''; }
+                        }
+                        """, api_url) or ""
+                        if desc_text:
+                            log.info("      Desc Strategy 3: got %d chars from %s", len(desc_text), api_url[:80])
+                    except Exception:
+                        pass
+
+            # Strategy 4: Extract description from page's embedded JSON data
+            if not desc_text:
+                log.info("      Desc: trying Strategy 4 (embedded page JSON)...")
                 try:
-                    api_url = f"https://www.aliexpress.com/fn/item-description/index.html?productId={product_id}"
                     desc_text = detail_tab.evaluate("""
-                    async (url) => {
-                        try {
-                            const resp = await fetch(url, {credentials: 'include'});
-                            const html = await resp.text();
-                            const tmp = document.createElement('div');
-                            tmp.innerHTML = html;
-                            tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
-                            let text = tmp.innerText.trim();
-                            if (text.length > 20) return text.substring(0, 3000);
-                            return '';
-                        } catch(e) { return ''; }
+                    () => {
+                        const html = document.documentElement.innerHTML;
+
+                        // Strategy 4a: Look for description in __INIT_DATA__ or similar embedded data
+                        const dataPatterns = [
+                            /"(?:product)?[Dd]escription"\\s*:\\s*"([^"]{50,})"/,
+                            /"descriptionContent"\\s*:\\s*"([^"]{50,})"/,
+                            /"detailDesc"\\s*:\\s*"([^"]{50,})"/,
+                            /"detail"\\s*:\\s*\\{[^}]*"description"\\s*:\\s*"([^"]{50,})"/,
+                        ];
+                        for (const p of dataPatterns) {
+                            const m = html.match(p);
+                            if (m) {
+                                try {
+                                    // Unescape JSON string
+                                    let text = JSON.parse('"' + m[1] + '"');
+                                    // If it's HTML, parse it
+                                    if (text.includes('<')) {
+                                        const tmp = document.createElement('div');
+                                        tmp.innerHTML = text;
+                                        tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                        text = tmp.innerText.trim();
+                                    }
+                                    if (text.length >= 50) return text.substring(0, 3000);
+                                } catch(e) {}
+                            }
+                        }
+
+                        // Strategy 4b: Look for descriptionUrl in any format and report it
+                        const urlPatterns = [
+                            /['"](https?:\/\/[^'"\\s]*desc[^'"\\s]*\.html?)['"]/i,
+                            /['"](\/\/[^'"\\s]*desc[^'"\\s]*\.html?)['"]/i,
+                            /['"](https?:\/\/[^'"\\s]*alicdn[^'"\\s]*desc[^'"\\s]*)['"]/i,
+                        ];
+                        for (const p of urlPatterns) {
+                            const m = html.match(p);
+                            if (m) {
+                                return '__URL__:' + m[1];
+                            }
+                        }
+
+                        // Strategy 4c: Search all script content for any large text blocks about the product
+                        const scripts = document.querySelectorAll('script');
+                        for (const s of scripts) {
+                            const t = s.textContent || '';
+                            if (t.length < 200) continue;
+
+                            // Look for HTML content in JSON that might be description
+                            const htmlMatch = t.match(/"(?:description|desc|detail)(?:Html|Content|Text)?"\\s*:\\s*"(<[^"]{100,})"/i);
+                            if (htmlMatch) {
+                                try {
+                                    let decoded = JSON.parse('"' + htmlMatch[1] + '"');
+                                    const tmp = document.createElement('div');
+                                    tmp.innerHTML = decoded;
+                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                    const text = tmp.innerText.trim();
+                                    if (text.length >= 50) return text.substring(0, 3000);
+                                } catch(e) {}
+                            }
+                        }
+
+                        return '';
                     }
-                    """, api_url) or ""
-                except Exception:
-                    pass
+                    """) or ""
+
+                    if desc_text and desc_text.startswith("__URL__:"):
+                        found_url = desc_text[8:]
+                        if found_url.startswith("//"):
+                            found_url = "https:" + found_url
+                        log.info("      Desc Strategy 4: found desc URL: %s", found_url[:120])
+                        try:
+                            desc_text = detail_tab.evaluate("""
+                            async (url) => {
+                                try {
+                                    const resp = await fetch(url);
+                                    if (!resp.ok) return '';
+                                    const html = await resp.text();
+                                    const tmp = document.createElement('div');
+                                    tmp.innerHTML = html;
+                                    tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                                    let text = tmp.innerText.trim();
+                                    if (text.length >= 50) return text.substring(0, 3000);
+                                    return '';
+                                } catch(e) { return ''; }
+                            }
+                            """, found_url) or ""
+                        except Exception:
+                            desc_text = ""
+                    elif desc_text:
+                        log.info("      Desc Strategy 4: got %d chars from embedded JSON", len(desc_text))
+                except Exception as e:
+                    log.info("      Desc Strategy 4 error: %s", str(e)[:120])
 
             if specs_text:
                 log.info("      Specs: %s", specs_text[:120])
