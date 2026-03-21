@@ -866,17 +866,23 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
     }
 
     try:
-        # Set up early network listener to catch description URLs during page load
-        # Captures both analysis.json (store type 1) and desc.htm (store type 2)
+        # Set up early network listener to catch description content during page load
+        # Captures the RESPONSE BODY directly (not just URL) to avoid CORS/cache issues
         _early_captured_module_url = []
+        _early_captured_desc_body = []  # store (url, html_body) tuples
         def _early_on_response(response):
             try:
                 url = response.url
                 if response.status == 200:
                     if "analysis.json" in url:
                         _early_captured_module_url.append(url)
-                    elif "aeproductsourcesite" in url and "desc" in url:
-                        _early_captured_module_url.append(url)
+                    elif "aeproductsourcesite" in url and "desc" in url.lower():
+                        try:
+                            body = response.text()
+                            if body and len(body) > 100:
+                                _early_captured_desc_body.append((url, body))
+                        except Exception:
+                            _early_captured_module_url.append(url)
             except Exception:
                 pass
         detail_tab.on("response", _early_on_response)
@@ -1068,73 +1074,59 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             except Exception:
                 pass
 
-            # Check what the early listener caught during page load
-            if _early_captured_module_url:
-                log.info("      Desc: early listener caught %d URLs during page load", len(_early_captured_module_url))
-                for _eu_log in _early_captured_module_url[:3]:
-                    log.info("      Desc: early URL: %s", _eu_log[:100])
-            _desc_url_to_fetch = ""
-            for _eu in _early_captured_module_url:
-                if _eu:
-                    _desc_url_to_fetch = _eu
-                    # Cache analysis.json URLs for reuse across products
-                    if "analysis.json" in _eu and not _cached_moduleanalysis_url:
-                        _cached_moduleanalysis_url = _eu
-                    break
-
-            # If we have a cached moduleanalysis URL (store type 1), fetch it directly
-            if not _desc_url_to_fetch and _cached_moduleanalysis_url:
-                _desc_url_to_fetch = _cached_moduleanalysis_url
-
-            # If early listener caught a desc.htm URL, read from the IFRAME
-            # (fetch() fails cross-origin, but the iframe already has the content)
-            if _desc_url_to_fetch and "aeproductsourcesite" in _desc_url_to_fetch:
-                log.info("      Desc: reading iframe for desc.htm...")
-                for frame in detail_tab.frames:
-                    if frame == detail_tab.main_frame:
-                        continue
-                    fu = (frame.url or "")
-                    if "aeproductsourcesite" not in fu:
-                        continue
-                    try:
-                        fr = frame.evaluate("""
-                        () => {
-                            if (!document.body || document.body.innerText.trim().length < 50) return '';
-                            let text = document.body.innerText.trim();
-                            if (/^\\s*(\\/\\*|!function|\\(function|with\\(|var |let |const |function )/.test(text)) return '';
-                            for (const cut of ['additional regulatory', 'regulatory information']) {
-                                const idx = text.toLowerCase().indexOf(cut);
-                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
-                            }
-                            let firstImg = '';
-                            document.querySelectorAll('img').forEach(img => {
-                                if (firstImg) return;
-                                const src = img.src || img.getAttribute('data-src') || img.getAttribute('src') || '';
-                                if (src && (src.includes('alicdn') || src.includes('ae01'))
-                                    && !src.includes('icon') && !src.includes('logo')) firstImg = src;
-                            });
-                            if (text.length < 50 && !firstImg) return '';
-                            return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+            # If early listener captured desc.htm BODY, parse it directly
+            if _early_captured_desc_body and not desc_text:
+                log.info("      Desc: parsing captured desc.htm body (%d bytes)", len(_early_captured_desc_body[0][1]))
+                try:
+                    _cap_body = _early_captured_desc_body[0][1]
+                    desc_parsed = detail_tab.evaluate("""
+                    (html) => {
+                        const tmp = document.createElement('div');
+                        tmp.innerHTML = html;
+                        let firstImg = '';
+                        tmp.querySelectorAll('img').forEach(img => {
+                            if (firstImg) return;
+                            const src = img.src || img.getAttribute('src') || img.getAttribute('data-src') || '';
+                            if (src && (src.includes('alicdn') || src.includes('ae01'))
+                                && !src.includes('icon') && !src.includes('logo')) firstImg = src;
+                        });
+                        tmp.querySelectorAll('img, script, style, video').forEach(e => e.remove());
+                        let text = tmp.innerText.trim();
+                        if (/^\\s*(\\/\\*|!function|\\(function|with\\(|var |let |const |function )/.test(text)) return '';
+                        for (const cut of ['additional regulatory', 'regulatory information']) {
+                            const idx = text.toLowerCase().indexOf(cut);
+                            if (idx > 0) { text = text.substring(0, idx).trim(); break; }
                         }
-                        """) or ""
-                        if fr:
-                            import json as _json_ifr
-                            pfr = _json_ifr.loads(fr)
-                            t = (pfr.get("text") or "").strip()
-                            img = pfr.get("img", "")
-                            if t and len(t) >= 50:
-                                desc_text = t
-                                log.info("      Desc: got %d chars from desc iframe", len(desc_text))
-                            if img and img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                                result["all_images"].append(img)
-                                log.info("      Desc: added description image (total: %d)", len(result["all_images"]))
-                            if desc_text:
-                                break
-                    except Exception:
-                        continue
+                        if (text.length < 50 && !firstImg) return '';
+                        return JSON.stringify({text: text.substring(0, 3000), img: firstImg});
+                    }
+                    """, _cap_body) or ""
+                    if desc_parsed:
+                        import json as _json_body
+                        pb = _json_body.loads(desc_parsed)
+                        desc_text = (pb.get("text") or "").strip()
+                        b_img = pb.get("img", "")
+                        if desc_text:
+                            log.info("      Desc: got %d chars from captured body", len(desc_text))
+                        if b_img and b_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                            result["all_images"].append(b_img)
+                except Exception as e:
+                    log.info("      Desc body parse error: %s", str(e)[:120])
 
-            # If we have a moduleanalysis URL (not desc.htm), fetch it via API
-            elif _desc_url_to_fetch:
+            # Check for moduleanalysis URL (store type 1)
+            _desc_url_to_fetch = ""
+            if not desc_text:
+                for _eu in _early_captured_module_url:
+                    if _eu:
+                        _desc_url_to_fetch = _eu
+                        if "analysis.json" in _eu and not _cached_moduleanalysis_url:
+                            _cached_moduleanalysis_url = _eu
+                        break
+                if not _desc_url_to_fetch and _cached_moduleanalysis_url:
+                    _desc_url_to_fetch = _cached_moduleanalysis_url
+
+            # If we have a moduleanalysis URL, fetch it via API
+            if _desc_url_to_fetch and not desc_text:
                 log.info("      Desc: fetching moduleanalysis URL: %s", _desc_url_to_fetch[:80])
                 try:
                     desc_result = detail_tab.evaluate("""
@@ -1906,7 +1898,7 @@ def scroll_and_extract(tab):
         pass
     products = extract(tab)
     stale = 0
-    max_stale = 6
+    max_stale = 3
     while stale < max_stale:
         try:
             # Scroll to bottom, wait, then scroll up slightly and back down
