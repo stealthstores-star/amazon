@@ -1232,19 +1232,47 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     module_url = detail_tab.evaluate("""
                     () => {
                         const html = document.documentElement.innerHTML;
-                        // Look for moduleIds and adminAccountId in page source
-                        const moduleMatch = html.match(/moduleIds[=:]["']?(\\d+)/);
-                        const adminMatch = html.match(/adminAccountId[=:]["']?(\\d+)/);
-                        if (moduleMatch && adminMatch) {
+                        // Look for moduleIds and adminAccountId in page source — multiple patterns
+                        const modPatterns = [
+                            /moduleIds[=:]["']?(\\d+)/,
+                            /"moduleIds?"\\s*:\\s*"?(\\d+)/,
+                            /moduleId['"\\s:=]+(\\d{5,})/,
+                            /descriptionModule.*?"id"\\s*:\\s*(\\d+)/s,
+                        ];
+                        const adminPatterns = [
+                            /adminAccountId[=:]["']?(\\d+)/,
+                            /"adminAccountId"\\s*:\\s*"?(\\d+)/,
+                            /storeAdminId['"\\s:=]+(\\d+)/,
+                            /sellerId['"\\s:=]+(\\d+)/,
+                            /adminId['"\\s:=]+(\\d+)/,
+                        ];
+                        let modId = '', admId = '';
+                        for (const p of modPatterns) {
+                            const m = html.match(p);
+                            if (m) { modId = m[1]; break; }
+                        }
+                        for (const p of adminPatterns) {
+                            const m = html.match(p);
+                            if (m) { admId = m[1]; break; }
+                        }
+                        if (modId && admId) {
                             return 'https://moduleanalysis.aliexpress.com/item/desc/module/analysis.json?moduleIds='
-                                + moduleMatch[1] + '&adminAccountId=' + adminMatch[1];
+                                + modId + '&adminAccountId=' + admId;
                         }
                         // Also check script tags for storeModule or descriptionModule
                         const scripts = document.querySelectorAll('script');
                         for (const s of scripts) {
                             const t = s.textContent || '';
-                            const m1 = t.match(/"moduleId"\\s*:\\s*(\\d+)/);
-                            const m2 = t.match(/"adminAccountId"\\s*:\\s*"?(\\d+)/);
+                            if (t.length < 50) continue;
+                            let m1 = null, m2 = null;
+                            for (const p of modPatterns) {
+                                m1 = t.match(p);
+                                if (m1) break;
+                            }
+                            for (const p of adminPatterns) {
+                                m2 = t.match(p);
+                                if (m2) break;
+                            }
                             if (m1 && m2) {
                                 return 'https://moduleanalysis.aliexpress.com/item/desc/module/analysis.json?moduleIds='
                                     + m1[1] + '&adminAccountId=' + m2[1];
@@ -1689,6 +1717,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         pass
 
                     # Sort captured URLs: desc-related first, then others
+                    log.info("      Desc: %d network responses captured after View More", len(captured_urls))
                     if captured_urls:
                         captured_urls.sort(key=lambda x: (0 if x.get("is_desc") else 1))
                         for cu in captured_urls[:8]:
