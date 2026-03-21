@@ -485,6 +485,7 @@ DETAIL_EXTRACT_JS = """
         price: '',
         originalPrice: '',
         shipping: '',
+        description: '',
     };
 
     // Helper: clean an image URL to get full-size version
@@ -644,6 +645,81 @@ DETAIL_EXTRACT_JS = """
     );
     if (titleEl) result.title = titleEl.innerText.trim();
 
+    // Get product description / specifications
+    // Strategy 1: Product description section (below images, often in an iframe or div)
+    const descSels = [
+        '[class*="product-description"]', '[class*="ProductDescription"]',
+        '[class*="detail-desc"]', '[class*="detailDesc"]',
+        '[id*="product-description"]', '[data-pl="product-description"]',
+        '[class*="product-detail-info"]',
+        '[class*="specification"] [class*="content"]',
+    ];
+    for (const sel of descSels) {
+        try {
+            const el = document.querySelector(sel);
+            if (el) {
+                const t = el.innerText.trim();
+                if (t.length > 20) {
+                    result.description = t.substring(0, 2000);
+                    break;
+                }
+            }
+        } catch(e) {}
+    }
+    // Strategy 2: Specifications / attributes table
+    if (!result.description || result.description.length < 50) {
+        const specSels = [
+            '[class*="specification"]', '[class*="Specification"]',
+            '[class*="product-specs"]', '[class*="sku-info"]',
+            '[class*="product-properties"]', '[class*="ItemSpecTable"]',
+            '[class*="detail-attributes"]',
+        ];
+        let specs = [];
+        for (const sel of specSels) {
+            try {
+                const el = document.querySelector(sel);
+                if (el) {
+                    // Extract key-value pairs from spec rows
+                    const rows = el.querySelectorAll('li, tr, [class*="property-item"], [class*="attr-item"]');
+                    for (const row of rows) {
+                        const t = row.innerText.trim().replace(/\\s+/g, ' ');
+                        if (t.length > 3 && t.length < 200) specs.push(t);
+                    }
+                    if (specs.length === 0) {
+                        const t = el.innerText.trim();
+                        if (t.length > 20) specs.push(t);
+                    }
+                }
+            } catch(e) {}
+            if (specs.length > 0) break;
+        }
+        if (specs.length > 0) {
+            const specText = specs.join(' | ');
+            result.description = result.description
+                ? result.description + '\\n' + specText
+                : specText.substring(0, 2000);
+        }
+    }
+    // Strategy 3: JSON data in script tags
+    if (!result.description) {
+        try {
+            const scripts = document.querySelectorAll('script');
+            for (const s of scripts) {
+                const t = s.textContent || '';
+                const dm = t.match(/"description"\\s*:\\s*"([^"]{20,})"/);
+                if (dm) {
+                    result.description = dm[1].replace(/\\\\n/g, ' ').replace(/\\\\"/g, '"').substring(0, 2000);
+                    break;
+                }
+                const dm2 = t.match(/"subject"\\s*:\\s*"([^"]{20,})"/);
+                if (dm2) {
+                    result.description = dm2[1].substring(0, 2000);
+                    break;
+                }
+            }
+        } catch(e) {}
+    }
+
     // Get price — try multiple selectors (AliExpress changes class names frequently)
     const priceSels = [
         '[class*="product-price-current"]', '[class*="uniform-banner-box-price"]',
@@ -768,6 +844,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         "detail_title": "",
         "detail_price": "",
         "detail_shipping": "",
+        "detail_description": "",
     }
 
     try:
@@ -805,6 +882,26 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
         # Dismiss any popups
         dismiss_popups(detail_tab)
 
+        # Click "Show more" / "View more" on description if present
+        try:
+            show_more_sels = [
+                'button:has-text("Show more")', 'button:has-text("View more")',
+                'a:has-text("Show more")', 'a:has-text("View more")',
+                '[class*="description"] [class*="more"]',
+                '[class*="expand"]', '[class*="show-more"]', '[class*="view-more"]',
+            ]
+            for sel in show_more_sels:
+                try:
+                    btn = detail_tab.query_selector(sel)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        detail_tab.wait_for_timeout(500)
+                        break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         data = detail_tab.evaluate(DETAIL_EXTRACT_JS)
 
         if data.get("images"):
@@ -817,15 +914,20 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             result["detail_price"] = data["price"]
         if data.get("shipping"):
             result["detail_shipping"] = data["shipping"]
+        if data.get("description"):
+            result["detail_description"] = data["description"]
 
-        # If we only got 1 image, try scrolling and re-extracting
-        if len(result["all_images"]) <= 1:
+        # If we only got 1 image or no description, scroll down and re-extract
+        if len(result["all_images"]) <= 1 or not result["detail_description"]:
             try:
-                detail_tab.evaluate("window.scrollTo(0, 300)")
+                # Scroll further — descriptions and specs are below the fold
+                detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
                 detail_tab.wait_for_timeout(800)
                 data2 = detail_tab.evaluate(DETAIL_EXTRACT_JS)
                 if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
                     result["all_images"] = data2["images"][:MAX_IMAGES]
+                if data2.get("description") and len(data2.get("description", "")) > len(result["detail_description"]):
+                    result["detail_description"] = data2["description"]
             except Exception:
                 pass
 
@@ -923,6 +1025,7 @@ def scrape_details_parallel(context, products, main_tab):
                 "detail_title": "",
                 "detail_price": "",
                 "detail_shipping": "",
+                "detail_description": "",
             }
             try:
                 # Skip if still on CAPTCHA
@@ -942,13 +1045,17 @@ def scrape_details_parallel(context, products, main_tab):
                     result["detail_price"] = data["price"]
                 if data.get("shipping"):
                     result["detail_shipping"] = data["shipping"]
-                # If only 1 image, scroll and retry
-                if len(result["all_images"]) <= 1:
-                    tabs[i].evaluate("window.scrollTo(0, 300)")
+                if data.get("description"):
+                    result["detail_description"] = data["description"]
+                # If only 1 image or no description, scroll and retry
+                if len(result["all_images"]) <= 1 or not result["detail_description"]:
+                    tabs[i].evaluate("window.scrollTo(0, document.body.scrollHeight * 0.5)")
                     tabs[i].wait_for_timeout(800)
                     data2 = tabs[i].evaluate(DETAIL_EXTRACT_JS)
                     if data2.get("images") and len(data2["images"]) > len(result["all_images"]):
                         result["all_images"] = data2["images"][:MAX_IMAGES]
+                    if data2.get("description") and len(data2.get("description", "")) > len(result["detail_description"]):
+                        result["detail_description"] = data2["description"]
             except Exception as e:
                 log.debug("  Detail scrape failed for %s: %s", pid, str(e)[:80])
             results[idx] = result
@@ -1738,14 +1845,18 @@ def ali_to_gbp(price_usd, shipping_str=None):
 
     Shipping is scraped from AliExpress detail pages and is already in GBP
     (AliExpress shows shipping in the user's local currency).
-    If no shipping was scraped, assumes free shipping (0).
+    If no shipping was scraped, assumes free shipping (£0).
 
-    Ensures min 30% margin OR min £7.50 profit — whichever gives the higher price.
+    Profit = sell_price - Amazon total fees - product cost - shipping
+    Where Amazon total fees = (sell_price * REFERRAL_FEE) + PER_ITEM_FEE
+
+    Target: profit >= 30% of sell price OR profit >= £7.50
+            — whichever gives the higher sell price.
     """
     if not price_usd:
         return DEFAULT_PRICE_GBP
     cost_gbp = price_usd * USD_TO_GBP
-    # Shipping is already in GBP from AliExpress (e.g. "£3.52", "Free")
+    # Shipping is already in GBP from AliExpress (e.g. "3.52", "Free")
     shipping_gbp = 0.0
     if shipping_str:
         s = shipping_str.lower().strip()
@@ -1753,16 +1864,24 @@ def ali_to_gbp(price_usd, shipping_str=None):
             parsed = parse_price(shipping_str)
             if parsed is not None:
                 shipping_gbp = parsed
-    total_cost = cost_gbp + shipping_gbp + AMAZON_PER_ITEM_FEE
-    # Price for 30% margin: sell = total_cost / (1 - referral_fee - margin)
-    denominator = 1 - AMAZON_REFERRAL_FEE - TARGET_PROFIT_MARGIN
-    if denominator <= 0:
+    sourcing_cost = cost_gbp + shipping_gbp
+
+    # --- Price for 30% margin ---
+    # profit = sell - sell*referral - per_item - sourcing_cost
+    # We want: profit >= 0.30 * sell
+    # sell - sell*referral - per_item - sourcing_cost >= 0.30 * sell
+    # sell * (1 - referral - 0.30) >= per_item + sourcing_cost
+    # sell >= (per_item + sourcing_cost) / (1 - referral - 0.30)
+    denom_margin = 1 - AMAZON_REFERRAL_FEE - TARGET_PROFIT_MARGIN
+    if denom_margin <= 0:
         return DEFAULT_PRICE_GBP
-    price_for_margin = total_cost / denominator
-    # Price for £7.50 min profit: profit = sell - sell*referral - per_item - cost - shipping
-    # profit = sell*(1-referral) - per_item - cost_gbp - shipping_gbp
-    # sell = (profit + per_item + cost_gbp + shipping_gbp) / (1 - referral)
-    price_for_min_profit = (MIN_PROFIT_GBP + AMAZON_PER_ITEM_FEE + cost_gbp + shipping_gbp) / (1 - AMAZON_REFERRAL_FEE)
+    price_for_margin = (AMAZON_PER_ITEM_FEE + sourcing_cost) / denom_margin
+
+    # --- Price for £7.50 minimum profit ---
+    # profit = sell * (1 - referral) - per_item - sourcing_cost >= 7.50
+    # sell >= (7.50 + per_item + sourcing_cost) / (1 - referral)
+    price_for_min_profit = (MIN_PROFIT_GBP + AMAZON_PER_ITEM_FEE + sourcing_cost) / (1 - AMAZON_REFERRAL_FEE)
+
     # Use whichever gives the higher sell price
     sell_price = max(price_for_margin, price_for_min_profit)
     sell_price = round(sell_price, 2)
@@ -1978,8 +2097,55 @@ def make_bullets(title):
     return bullets[:5]
 
 
-def make_description(title):
-    """Generate a detailed, product-specific Amazon description."""
+def _extract_specs_from_ali_desc(ali_desc):
+    """Extract useful specifications and features from AliExpress description text."""
+    if not ali_desc:
+        return []
+    specs = []
+    lines = ali_desc.replace('|', '\n').split('\n')
+    # Common spec patterns to extract
+    spec_patterns = [
+        r'(?:material|made\s+(?:of|from))\s*[:\-]?\s*(.+)',
+        r'(?:size|dimensions?|height|width|length)\s*[:\-]?\s*(.+)',
+        r'(?:weight)\s*[:\-]?\s*(.+)',
+        r'(?:scale)\s*[:\-]?\s*(.+)',
+        r'(?:colour|color)\s*[:\-]?\s*(.+)',
+        r'(?:package\s+includes?|includes?|contents?)\s*[:\-]?\s*(.+)',
+        r'(?:suitable\s+for|fits?|compatible)\s*[:\-]?\s*(.+)',
+        r'(\d+\s*(?:cm|mm|inch|pcs|pieces|parts)[\w\s]*)',
+    ]
+    seen = set()
+    for line in lines:
+        line = line.strip()
+        if not line or len(line) < 5 or len(line) > 300:
+            continue
+        low = line.lower()
+        # Skip AliExpress marketing spam
+        if any(w in low for w in ['aliexpress', 'ali express', 'wholesale', 'dropship',
+                                   'free shipping', 'buy now', 'click here', 'add to cart',
+                                   'hot sale', 'best seller', 'factory direct', 'cheap',
+                                   'wish list', 'feedback', 'store', 'shop now']):
+            continue
+        for pat in spec_patterns:
+            m = re.search(pat, line, re.IGNORECASE)
+            if m:
+                val = m.group(0).strip().rstrip(':').rstrip('-')
+                if val.lower() not in seen and len(val) > 3:
+                    seen.add(val.lower())
+                    specs.append(val)
+                break
+        else:
+            # Keep informative lines that describe the product (not marketing)
+            if 10 < len(line) < 200 and not re.search(r'[!]{2,}|[$€£¥]|\d{5,}|http|www\.|\.com', line):
+                key = line.lower()[:40]
+                if key not in seen:
+                    seen.add(key)
+                    specs.append(line)
+    return specs[:15]  # Cap at 15 useful specs
+
+
+def make_description(title, ali_description=None):
+    """Generate a detailed Amazon description using AliExpress source description when available."""
     clean = clean_title(title)
     text = title.lower()
     scale = _detect_scale(title)
@@ -2004,6 +2170,19 @@ def make_description(title):
         parts.append(f"A fun and detailed collectible figure for sports fans and figure collectors alike.")
     else:
         parts.append(f"This {material.lower()} model kit features carefully sculpted details for an impressive display piece.")
+
+    # Extract and incorporate specs from AliExpress description
+    ali_specs = _extract_specs_from_ali_desc(ali_description)
+    if ali_specs:
+        # Group specs into a product details section
+        spec_lines = []
+        for spec in ali_specs:
+            # Clean up the spec line for Amazon (capitalize, remove trailing punctuation)
+            spec = spec.strip().rstrip('.')
+            if spec:
+                spec_lines.append(spec)
+        if spec_lines:
+            parts.append("Product Details: " + ". ".join(spec_lines[:8]) + ".")
 
     # Scale info
     if scale:
@@ -2236,8 +2415,9 @@ def fill_amazon_template(template_path, products):
         price_usd = parse_price(price_str)
         shipping_str = product.get("shipping", "")
         sell_price = ali_to_gbp(price_usd, shipping_str=shipping_str)
+        ali_desc = product.get("ali_description", "")
         bullets = make_bullets(title)
-        description = make_description(title)
+        description = make_description(title, ali_description=ali_desc)
 
         # Parse variations
         variations = []
@@ -3208,6 +3388,9 @@ def main():
                             # Fill in shipping cost from detail page
                             if detail.get("detail_shipping"):
                                 product["shipping"] = detail["detail_shipping"]
+                            # Fill in AliExpress description from detail page
+                            if detail.get("detail_description"):
+                                product["ali_description"] = detail["detail_description"]
 
                 prev_total = csv_out.count
                 csv_out.add(products, url)
