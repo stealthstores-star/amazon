@@ -3314,12 +3314,12 @@ def post_process(csv_path):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-    log.info("  %d images to rehost across %d products (parallel, 20 workers)...",
+    log.info("  %d images to rehost across %d products (parallel, 50 workers)...",
              len(upload_tasks), len(product_rows))
 
     # Run uploads in parallel
     results = {}  # task_index -> new_url
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    with ThreadPoolExecutor(max_workers=50) as pool:
         future_map = {pool.submit(rehost_image, task[3]): i for i, task in enumerate(upload_tasks)}
         for future in as_completed(future_map):
             idx = future_map[future]
