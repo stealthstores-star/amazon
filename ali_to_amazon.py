@@ -55,7 +55,7 @@ HANDLING_DAYS = 7
 QUANTITY = 5
 MAX_PAGES = 50
 MAX_IMAGES = 9                  # Amazon allows main + 8 other images
-PARALLEL_TABS = 1               # Single tab — 2 tabs triggers CAPTCHAs
+PARALLEL_TABS = 3               # Parallel detail tabs — speeds up detail scraping 3x
 
 # Proxy pool disabled — cheap datacenter proxies trigger more CAPTCHAs than
 # browsing direct from a residential IP.  Keep the list empty so proxy code
@@ -837,7 +837,7 @@ def scrape_details_parallel(context, products, main_tab):
                     tabs[i].goto(product["product_url"], wait_until="commit", timeout=10000)
                 except Exception:
                     pass
-            time.sleep(random.uniform(3.0, 5.0))
+            time.sleep(random.uniform(1.5, 3.0))
 
         # Extract data from all tabs
         for i, product in enumerate(batch):
@@ -1301,17 +1301,17 @@ def scroll_and_extract(tab):
         pass
     products = extract(tab)
     stale = 0
-    max_stale = 8  # More rounds — AliExpress AJAX can be slow to load next batch
+    max_stale = 5  # Reduced from 8 — stop sooner when no new products appear
     while stale < max_stale:
         try:
             # Scroll to bottom, wait, then scroll up slightly and back down
             # to trigger lazy-load observers that need scroll direction changes
             tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            tab.wait_for_timeout(1500)
+            tab.wait_for_timeout(800)
             tab.evaluate("window.scrollBy(0, -500)")
-            tab.wait_for_timeout(500)
+            tab.wait_for_timeout(300)
             tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            tab.wait_for_timeout(1500)
+            tab.wait_for_timeout(800)
         except Exception:
             break
         new = extract(tab)
@@ -3057,42 +3057,44 @@ def main():
                     products = products[:remaining]
 
                 # --- Visit each product detail page for ALL images + variations ---
-                # Use a SEPARATE tab for detail scraping — never navigate the main tab
-                # away from search results.
+                # Use parallel tabs for speed, fall back to sequential if needed.
                 if not args.skip_details and products:
-                    detail_tab = None
-                    try:
-                        detail_tab = context.new_page()
-                    except Exception as e:
-                        log.warning("  Could not open detail tab: %s", e)
-
-                    if detail_tab:
+                    detail_results = None
+                    # Try parallel detail scraping first (PARALLEL_TABS tabs)
+                    if PARALLEL_TABS > 1:
+                        detail_results = scrape_details_parallel(context, products, tab)
+                    # Fall back to sequential if parallel failed or PARALLEL_TABS==1
+                    if detail_results is None:
                         detail_results = []
-                        for p_idx, product in enumerate(products):
-                            pid = product["id"]
-                            product_url = product["product_url"]
-                            if p_idx > 0:
-                                time.sleep(random.uniform(3.0, 5.0))
-                            log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
-                            handle_captcha(tab)
-                            detail_results.append(scrape_product_detail(detail_tab, product_url, pid, context=context, main_tab=tab))
-                            # Close any popup tabs AliExpress opened (keep main + detail)
+                        detail_tab = None
+                        try:
+                            detail_tab = context.new_page()
+                        except Exception as e:
+                            log.warning("  Could not open detail tab: %s", e)
+                        if detail_tab:
+                            for p_idx, product in enumerate(products):
+                                pid = product["id"]
+                                product_url = product["product_url"]
+                                if p_idx > 0:
+                                    time.sleep(random.uniform(1.5, 3.0))
+                                log.info("    [%d/%d] Fetching details for %s...", p_idx + 1, len(products), pid)
+                                handle_captcha(tab)
+                                detail_results.append(scrape_product_detail(detail_tab, product_url, pid, context=context, main_tab=tab))
+                                try:
+                                    for p in context.pages:
+                                        if p != tab and p != detail_tab:
+                                            p.close()
+                                except Exception:
+                                    pass
                             try:
-                                for p in context.pages:
-                                    if p != tab and p != detail_tab:
-                                        p.close()
+                                detail_tab.close()
                             except Exception:
                                 pass
 
-                        # Close the detail tab when done
-                        try:
-                            detail_tab.close()
-                        except Exception:
-                            pass
-
-                        # Apply detail results to products
+                    # Apply detail results to products
+                    if detail_results:
                         for p_idx, product in enumerate(products):
-                            detail = detail_results[p_idx]
+                            detail = detail_results[p_idx] if p_idx < len(detail_results) else None
                             if not detail:
                                 continue
                             if detail["all_images"]:
@@ -3143,7 +3145,7 @@ def main():
                 clicked = click_next(tab, pg - 1)
                 if clicked:
                     log.info("    Clicked pagination button for page %d", pg)
-                    tab.wait_for_timeout(3000)
+                    tab.wait_for_timeout(1500)
                     # Wait for new content to load
                     try:
                         tab.wait_for_selector("a[href*='/item/']", timeout=8000)
@@ -3163,7 +3165,7 @@ def main():
                         log.info("  Could not reach page %d — done.", pg)
                         break
 
-                time.sleep(random.uniform(3.0, 5.0))
+                time.sleep(random.uniform(1.5, 3.0))
 
             if args.limit > 0 and csv_out.count >= args.limit:
                 break
