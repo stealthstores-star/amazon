@@ -847,10 +847,11 @@ DETAIL_EXTRACT_JS = """
 # Cache for store-level moduleanalysis URL (same for all products in a store)
 _cached_moduleanalysis_url = ""
 # Track which desc strategy works for this store to skip slow ones
-_store_desc_strategy = ""  # e.g. "s2", "s4", "s5" — skip slow strategies if we know what works
+_store_desc_strategy = ""  # e.g. "s2", "s4", "s5", "none" — skip slow strategies
+_store_desc_failures = 0   # consecutive desc failures — after 3, mark store as "none"
 
 def scrape_product_detail(detail_tab, product_url, product_id, context=None, main_tab=None):
-    global _cached_moduleanalysis_url, _store_desc_strategy
+    global _cached_moduleanalysis_url, _store_desc_strategy, _store_desc_failures, _store_desc_failures
     """Visit a product detail page and extract all images + variations.
 
     Uses detail_tab (a dedicated tab) so the main search results tab is untouched.
@@ -1125,13 +1126,17 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     if s5_result:
                         import json as _json7b
                         parsed = _json7b.loads(s5_result)
-                        if parsed.get("text") and len(parsed["text"]) >= 150:
-                            desc_text = parsed["text"]
+                        _s5t = (parsed.get("text") or "").strip()
+                        # Python-side reject: titles/meta, not real descriptions
+                        if _s5t and len(_s5t) >= 300 and not _s5t.startswith("Buy ") and not _s5t.startswith("Smarter Shopping"):
+                            desc_text = _s5t
                             log.info("      Desc Strategy 5 (cached): got %d chars", len(desc_text))
-                        s5_img = parsed.get("img", "")
-                        if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                            result["all_images"].append(s5_img)
-                            log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                            s5_img = parsed.get("img", "")
+                            if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                result["all_images"].append(s5_img)
+                                log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                        elif _s5t:
+                            log.info("      Desc Strategy 5 (cached): rejected (%d chars, starts='%s')", len(_s5t), _s5t[:30])
                 except Exception:
                     pass
 
@@ -1932,16 +1937,20 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     if s5_result:
                         import json as _json7
                         parsed = _json7.loads(s5_result)
-                        if parsed.get("text") and len(parsed["text"]) >= 150:
-                            desc_text = parsed["text"]
+                        _s5t = (parsed.get("text") or "").strip()
+                        # Python-side reject: must be 300+ chars and NOT a product title
+                        if _s5t and len(_s5t) >= 300 and not _s5t.startswith("Buy ") and not _s5t.startswith("Smarter Shopping"):
+                            desc_text = _s5t
                             if not _store_desc_strategy:
                                 _store_desc_strategy = "s5"
                                 log.info("      Desc: CACHED Strategy 5 as working for this store (faster for remaining products)")
                             log.info("      Desc Strategy 5: got %d chars from JS globals", len(desc_text))
-                        s5_img = parsed.get("img", "")
-                        if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
-                            result["all_images"].append(s5_img)
-                            log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                            s5_img = parsed.get("img", "")
+                            if s5_img and s5_img not in result["all_images"] and len(result["all_images"]) < MAX_IMAGES:
+                                result["all_images"].append(s5_img)
+                                log.info("      Desc: added 1st description image (total: %d)", len(result["all_images"]))
+                        elif _s5t:
+                            log.info("      Desc Strategy 5: rejected (%d chars, starts='%s')", len(_s5t), _s5t[:40])
                 except Exception as e:
                     log.info("      Desc Strategy 5 error: %s", str(e)[:120])
 
@@ -1949,8 +1958,14 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 log.info("      Specs: %s", specs_text[:120])
             if desc_text:
                 log.info("      Desc: %d chars — %s", len(desc_text), desc_text[:100])
+                _store_desc_failures = 0  # reset on success
             else:
-                log.info("      Desc: none found")
+                _store_desc_failures += 1
+                if _store_desc_failures >= 3 and not _store_desc_strategy:
+                    _store_desc_strategy = "none"
+                    log.info("      Desc: none found (3 consecutive failures — skipping desc for remaining products in this store)")
+                else:
+                    log.info("      Desc: none found")
 
             combined = ""
             if specs_text:
@@ -4097,7 +4112,7 @@ def post_process(csv_path):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    global _cached_moduleanalysis_url, _store_desc_strategy
+    global _cached_moduleanalysis_url, _store_desc_strategy, _store_desc_failures
     parser = argparse.ArgumentParser(
         description="Scrape AliExpress products and generate Amazon bulk upload file"
     )
@@ -4287,6 +4302,7 @@ def main():
             # Reset store-level cache for new URL
             _cached_moduleanalysis_url = ""
             _store_desc_strategy = ""
+            _store_desc_failures = 0
 
             ensure_browser()
 
