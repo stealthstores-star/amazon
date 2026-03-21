@@ -844,7 +844,11 @@ DETAIL_EXTRACT_JS = """
 """
 
 
+# Cache for store-level moduleanalysis URL (same for all products in a store)
+_cached_moduleanalysis_url = ""
+
 def scrape_product_detail(detail_tab, product_url, product_id, context=None, main_tab=None):
+    global _cached_moduleanalysis_url
     """Visit a product detail page and extract all images + variations.
 
     Uses detail_tab (a dedicated tab) so the main search results tab is untouched.
@@ -1155,7 +1159,11 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 except Exception:
                     module_url = ""
                 api_urls = []
-                if module_url:
+                # Try cached moduleanalysis URL first (same for all products in a store)
+                if _cached_moduleanalysis_url:
+                    api_urls.append(_cached_moduleanalysis_url)
+                    log.info("      Desc: using cached moduleanalysis URL")
+                if module_url and module_url not in api_urls:
                     api_urls.append(module_url)
                     log.info("      Desc: found moduleanalysis URL: %s", module_url[:120])
                 api_urls.extend([
@@ -1233,6 +1241,9 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             except (json.JSONDecodeError, TypeError, ValueError):
                                 pass  # desc_text is plain text, not JSON
                             log.info("      Desc Strategy 2: got %d chars from %s", len(desc_text), api_url[:80])
+                            # Cache moduleanalysis URL if it worked
+                            if "moduleanalysis" in api_url:
+                                _cached_moduleanalysis_url = api_url
                     except Exception:
                         pass
 
@@ -1415,11 +1426,15 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Log captured URLs
+                    # Log captured URLs and cache moduleanalysis URL
                     if captured_urls:
                         for cu in captured_urls[:5]:
                             log.info("      Desc captured: %s (status=%s, ct=%s)",
                                      cu["url"][:120], cu["status"], cu["ct"][:40])
+                            # Cache moduleanalysis URL for reuse across products
+                            if "moduleanalysis" in cu["url"] and cu["status"] == 200:
+                                _cached_moduleanalysis_url = cu["url"]
+                                log.info("      Desc: cached moduleanalysis URL for store")
 
                     # Try to fetch each captured URL for description content
                     desc_img = ""
@@ -3836,6 +3851,7 @@ def post_process(csv_path):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    global _cached_moduleanalysis_url
     parser = argparse.ArgumentParser(
         description="Scrape AliExpress products and generate Amazon bulk upload file"
     )
@@ -4021,6 +4037,9 @@ def main():
         for i, url in enumerate(urls, 1):
             url = sort_by_orders(url)
             log.info("[%d/%d] %s", i, len(urls), url)
+
+            # Reset store-level cache for new URL
+            _cached_moduleanalysis_url = ""
 
             ensure_browser()
 
