@@ -3521,7 +3521,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Scrape AliExpress products and generate Amazon bulk upload file"
     )
-    parser.add_argument("urls_file", help="Text file with AliExpress URLs (one per line)")
+    parser.add_argument("urls_file", nargs='?', default=None,
+                        help="Text file with AliExpress URLs (one per line)")
     parser.add_argument("-o", "--output", default=None, help="Output CSV path")
     parser.add_argument("--skip-details", action="store_true",
                         help="Skip visiting individual product pages (faster but only 1 image)")
@@ -3531,7 +3532,16 @@ def main():
                         help="Limit total number of products to scrape (0 = no limit)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from existing CSV — skip already-scraped products")
+    parser.add_argument("--post-process", dest="post_process", default=None, metavar="CSV",
+                        help="Run only post-processing (rehost images, Amazon template, offer file) on an existing CSV")
     args = parser.parse_args()
+
+    if args.post_process:
+        post_process(args.post_process)
+        return
+
+    if not args.urls_file:
+        parser.error("urls_file is required (unless using --post-process)")
 
     lines = Path(args.urls_file).read_text().splitlines()
     urls = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
