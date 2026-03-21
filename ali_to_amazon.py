@@ -1479,7 +1479,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     tmp.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
                                     let text = tmp.innerText.trim();
                                     // Reject JavaScript code
-                                    if (text.startsWith('/*') || text.startsWith('!function') || text.startsWith('(function'))
+                                    if (/^\s*(\/\*|!function|\(function|function\s*\()/.test(text))
                                         return '';
                                     for (const cut of ['additional regulatory', 'regulatory information']) {
                                         const idx = text.toLowerCase().indexOf(cut);
@@ -1495,6 +1495,29 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 parsed = _json4.loads(fetch_result)
                                 t = parsed.get("text", "")
                                 img = parsed.get("img", "")
+                                # Python-side safety: if JS didn't parse the JSON, do it here
+                                if t and t.lstrip().startswith("{"):
+                                    try:
+                                        j = _json4.loads(t)
+                                        if isinstance(j.get("data"), dict):
+                                            for v in j["data"].values():
+                                                if isinstance(v, str) and len(v) > 50:
+                                                    # Parse HTML from the extracted value
+                                                    import re as _re2
+                                                    clean = _re2.sub(r'<[^>]+>', ' ', v)
+                                                    clean = _re2.sub(r'\s+', ' ', clean).strip()
+                                                    t = clean[:3000]
+                                                    # Extract first image from HTML
+                                                    if not img:
+                                                        img_m = _re2.search(r'src=["\']?(https?://[^"\'>\s]+(?:alicdn|ae01|ae04)[^"\'>\s]*\.(?:jpg|png|jpeg|webp))', v, _re2.IGNORECASE)
+                                                        if img_m:
+                                                            img = img_m.group(1)
+                                                    break
+                                    except Exception:
+                                        pass
+                                # Reject JavaScript code
+                                if t and (t.lstrip().startswith("/*") or t.lstrip().startswith("!function")):
+                                    t = ""
                                 log.info("      Desc fetched: %d chars text, img=%s, htmlLen=%d",
                                          len(t), bool(img), parsed.get("htmlLen", 0))
                                 if t and len(t) >= 50:
@@ -1511,7 +1534,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                 continue
                             frame_url = (frame.url or "").lower()
                             # Skip known non-description frames
-                            if any(skip in frame_url for skip in ["wp.html", "store-proxy", "captcha", "recaptcha", "about:blank"]):
+                            if any(skip in frame_url for skip in ["wp.html", "store-proxy", "captcha", "recaptcha", "about:blank", "chrome-error"]):
                                 continue
                             try:
                                 body_len = frame.evaluate("() => (document.body ? document.body.innerHTML.length : 0)")
@@ -1521,7 +1544,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                         if (!document.body) return '';
                                         let text = document.body.innerText.trim();
                                         // Reject JavaScript code
-                                        if (text.startsWith('/*') || text.startsWith('!function') || text.startsWith('(function'))
+                                        if (/^\s*(\/\*|!function|\(function|function\s*\()/.test(text))
                                             return '';
                                         for (const cut of ['additional regulatory', 'regulatory information']) {
                                             const idx = text.toLowerCase().indexOf(cut);
@@ -1545,6 +1568,9 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                         parsed = _json5.loads(frame_result)
                                         t = parsed.get("text", "")
                                         img = parsed.get("img", "")
+                                        # Python-side: reject JS code that JS filter missed
+                                        if t and (t.lstrip().startswith("/*") or t.lstrip().startswith("!function") or "function(e){" in t[:100]):
+                                            t = ""
                                         if t and len(t) >= 50:
                                             desc_text = t
                                             log.info("      Desc: got %d chars from frame %s", len(t), (frame.url or "")[:60])
