@@ -26,6 +26,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading as _threading
 import time
 from datetime import datetime
 from io import BytesIO
@@ -2116,6 +2117,48 @@ def _upload_to_freeimage(jpeg_bytes):
     return None
 
 
+def _upload_to_imgbb_with_retry(jpeg_bytes, max_retries=3):
+    """Upload to imgbb with retry + exponential backoff on rate limits. Returns URL or None."""
+    import base64
+    b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+    for attempt in range(max_retries):
+        try:
+            resp = http_requests.post(
+                "https://api.imgbb.com/1/upload",
+                data={"key": IMGBB_API_KEY, "image": b64},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                img_data = data.get("data", {})
+                url = (img_data.get("image", {}).get("url", "")
+                       or img_data.get("display_url", "")
+                       or img_data.get("url", ""))
+                if url and _verify_hosted_image(url):
+                    return url
+                elif url:
+                    log.warning(f"          [IMG] imgbb uploaded but not accessible: {url}")
+                    return None
+            elif resp.status_code == 400 and "rate limit" in resp.text.lower():
+                wait = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                log.info(f"          [IMG] imgbb rate-limited, retrying in {wait}s (attempt {attempt+1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            else:
+                log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
+                return None
+        except Exception as e:
+            log.info(f"          [IMG] imgbb error: {e}")
+            return None
+    # All retries exhausted — mark imgbb as skipped for remaining images
+    log.warning("          [IMG] imgbb rate-limited after retries — skipping for remaining images")
+    global _imgbb_skip
+    _imgbb_skip = True
+    return None
+
+_imgbb_lock = _threading.Lock()
+_imgbb_skip = False
+
 def rehost_image(img_url):
     """Download image, convert to JPEG, upload to hosting. Returns URL for Amazon."""
     if not img_url:
@@ -2148,39 +2191,13 @@ def rehost_image(img_url):
     log.info(f"          [IMG] Downloaded {len(jpeg_bytes)} bytes, uploading...")
 
     # Try imgbb first (reliable, Amazon-accessible, full-size URLs)
-    # Skip if rate-limited (3+ consecutive failures)
-    if getattr(rehost_image, '_imgbb_fails', 0) < 3:
-        try:
-            import base64
-            b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
-            resp = http_requests.post(
-                "https://api.imgbb.com/1/upload",
-                data={"key": IMGBB_API_KEY, "image": b64},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                img_data = data.get("data", {})
-                # IMPORTANT: use image.url (full-size original), NOT display_url
-                # display_url is a 640px thumbnail which fails Amazon's 1000px minimum
-                url = (img_data.get("image", {}).get("url", "")
-                       or img_data.get("display_url", "")
-                       or img_data.get("url", ""))
-                if url:
-                    # Verify the uploaded image is accessible before returning
-                    if _verify_hosted_image(url):
-                        log.info(f"          [IMG] imgbb: {url}")
-                        rehost_image._imgbb_fails = 0
-                        return url
-                    else:
-                        log.warning(f"          [IMG] imgbb uploaded but not accessible: {url}")
-            log.warning(f"          [IMG] imgbb response: {resp.status_code} {resp.text[:200]}")
-            rehost_image._imgbb_fails = getattr(rehost_image, '_imgbb_fails', 0) + 1
-            if rehost_image._imgbb_fails >= 3:
-                log.warning("          [IMG] imgbb rate-limited — skipping for remaining images")
-        except Exception as e:
-            log.info(f"          [IMG] imgbb error: {e}")
-            rehost_image._imgbb_fails = getattr(rehost_image, '_imgbb_fails', 0) + 1
+    # Serialize imgbb requests with a lock to avoid concurrent rate limits
+    if not _imgbb_skip:
+        with _imgbb_lock:
+            result = _upload_to_imgbb_with_retry(jpeg_bytes)
+            if result:
+                log.info(f"          [IMG] imgbb: {result}")
+                return result
 
     # Try freeimage.host as fallback
     if getattr(rehost_image, '_freeimage_fails', 0) < 5:
