@@ -554,7 +554,8 @@ DETAIL_EXTRACT_JS = """
         }
     }
 
-    // --- Strategy 2: Gallery DOM elements ---
+    // --- Strategy 2: Gallery DOM elements (ONLY if JSON imagePathList gave nothing) ---
+    const skipDomImages = result.images.length > 0;  // imagePathList is authoritative
     const gallerySelectors = [
         '.image-view-magnifier-wrap img',
         '.images-view-item img',
@@ -574,26 +575,26 @@ DETAIL_EXTRACT_JS = """
         'picture source[srcset*="alicdn"]',
     ];
 
-    for (const sel of gallerySelectors) {
-        try {
-            const els = document.querySelectorAll(sel);
-            for (const el of els) {
-                // Check img src, data-src, srcset
-                const src = el.getAttribute('src') || el.getAttribute('data-src') ||
-                            el.getAttribute('srcset') || '';
+    if (!skipDomImages) {
+        for (const sel of gallerySelectors) {
+            try {
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    const src = el.getAttribute('src') || el.getAttribute('data-src') ||
+                                el.getAttribute('srcset') || '';
+                    addImage(src);
+                }
+            } catch(e) {}
+        }
+
+        // --- Strategy 3: Any large alicdn images on page ---
+        const allImgs = document.querySelectorAll('img[src*="alicdn"], img[data-src*="alicdn"]');
+        for (const img of allImgs) {
+            const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+            const rect = img.getBoundingClientRect();
+            if (rect.width >= 60 || rect.height >= 60 || src.includes('_50x50') || src.includes('_120x120')) {
                 addImage(src);
             }
-        } catch(e) {}
-    }
-
-    // --- Strategy 3: Any large alicdn images on page ---
-    const allImgs = document.querySelectorAll('img[src*="alicdn"], img[data-src*="alicdn"]');
-    for (const img of allImgs) {
-        const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
-        // Only include reasonably sized images (skip tiny icons)
-        const rect = img.getBoundingClientRect();
-        if (rect.width >= 60 || rect.height >= 60 || src.includes('_50x50') || src.includes('_120x120')) {
-            addImage(src);
         }
     }
 
@@ -1055,36 +1056,28 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                 }
                 result.specs = specLines.join(' | ');
 
-                // ---- DESC: from JSON description / detailDesc ----
+                // ---- DESC: find descriptionUrl in JSON, return it for fetching ----
+                // The "description" field is just the SEO meta title — NOT useful.
+                // The real description is at descriptionUrl (external HTML).
                 for (const s of scripts) {
                     const t = s.textContent || '';
-                    const patterns = [
-                        /"description"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/,
-                        /"detailDesc"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/,
-                    ];
-                    for (const pat of patterns) {
-                        const m = t.match(pat);
-                        if (m && m[1].length > 30) {
-                            let html = m[1]
-                                .replace(/\\\\n/g, ' ').replace(/\\\\"/g, '"')
-                                .replace(/\\\\t/g, ' ')
-                                .replace(/\\\\u003c/gi, '<').replace(/\\\\u003e/gi, '>');
-                            const tmp = document.createElement('div');
-                            tmp.innerHTML = html;
-                            let text = tmp.innerText.trim();
-                            // Stop at regulatory info
-                            const lower = text.toLowerCase();
-                            for (const cut of ['additional regulatory', 'regulatory information']) {
-                                const idx = lower.indexOf(cut);
-                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
-                            }
-                            if (text.length > 20) {
-                                result.desc = text.substring(0, 3000);
-                                break;
-                            }
+                    const m = t.match(/"descriptionUrl"\\s*:\\s*"(https?:[^"]+)"/);
+                    if (m) {
+                        result.descUrl = m[1];
+                        break;
+                    }
+                }
+                // Also try textDescription (some pages inline it)
+                if (!result.descUrl) {
+                    for (const s of scripts) {
+                        const t = s.textContent || '';
+                        const m = t.match(/"textDescription"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"/);
+                        if (m && m[1].length > 50) {
+                            let text = m[1].replace(/\\\\n/g, ' ').replace(/\\\\"/g, '"').replace(/\\\\t/g, ' ');
+                            result.desc = text.substring(0, 3000);
+                            break;
                         }
                     }
-                    if (result.desc) break;
                 }
                 return result;
             }
@@ -1092,13 +1085,40 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
 
             specs_text = specs_and_desc.get("specs", "")
             desc_text = specs_and_desc.get("desc", "")
+            desc_url = specs_and_desc.get("descUrl", "")
+
+            # Fetch actual description from descriptionUrl if available
+            if desc_url and not desc_text:
+                try:
+                    desc_text = detail_tab.evaluate("""
+                    async (url) => {
+                        try {
+                            const resp = await fetch(url);
+                            const html = await resp.text();
+                            const tmp = document.createElement('div');
+                            tmp.innerHTML = html;
+                            // Remove images, scripts, styles
+                            tmp.querySelectorAll('img, script, style').forEach(e => e.remove());
+                            let text = tmp.innerText.trim();
+                            // Stop at regulatory info
+                            const lower = text.toLowerCase();
+                            for (const cut of ['additional regulatory', 'regulatory information']) {
+                                const idx = lower.indexOf(cut);
+                                if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                            }
+                            return text.substring(0, 3000);
+                        } catch(e) { return ''; }
+                    }
+                    """, desc_url)
+                except Exception:
+                    pass
 
             if specs_text:
                 log.info("      Specs: %s", specs_text[:120])
             if desc_text:
                 log.info("      Desc: %d chars — %s", len(desc_text), desc_text[:100])
             else:
-                log.info("      Desc: none in page data")
+                log.info("      Desc: none found")
 
             combined = ""
             if specs_text:
