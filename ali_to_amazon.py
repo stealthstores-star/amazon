@@ -1129,43 +1129,49 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Step 3: Click "View more" only if it's inside the description section
+                    # Step 3: Click the description "View more" — it sits between
+                    # the description content and "Additional regulatory information"
                     try:
                         clicked_vm = detail_tab.evaluate("""
                         () => {
-                            // First find the description section container
-                            const descSection = document.querySelector(
-                                '[class*="description--wrap"], [class*="description--store"], ' +
-                                '[class*="product-description"], [class*="ProductDescription"]'
-                            );
-                            if (!descSection) return false;
-
-                            // Only look for "View more" within or near the description section
-                            const candidates = descSection.querySelectorAll('button, span, div, a');
-                            for (const btn of candidates) {
-                                if (btn.children.length > 3) continue;
-                                const text = (btn.innerText || '').trim().toLowerCase();
-                                if (text === 'view more' || text === 'show more' || text === 'see more') {
-                                    btn.click();
-                                    return text;
+                            // Find "Additional regulatory information" as a landmark
+                            let regulatoryY = Infinity;
+                            const allEls = document.querySelectorAll('h2, h3, h4, div, span, p, strong, b');
+                            for (const el of allEls) {
+                                const t = (el.innerText || '').trim().toLowerCase();
+                                if (t.includes('additional regulatory') || t.includes('regulatory information')) {
+                                    regulatoryY = el.getBoundingClientRect().top + window.scrollY;
+                                    break;
                                 }
                             }
 
-                            // Also check the next sibling of the description section
-                            let sibling = descSection.nextElementSibling;
-                            for (let i = 0; i < 3 && sibling; i++) {
-                                const text = (sibling.innerText || '').trim().toLowerCase();
-                                if (text === 'view more') {
-                                    sibling.click();
-                                    return 'view more (sibling)';
+                            // Find ALL "View more" buttons and pick the one closest to
+                            // (but above) the regulatory section
+                            let bestBtn = null;
+                            let bestY = -Infinity;
+                            const candidates = document.querySelectorAll('button, span, div, a');
+                            for (const btn of candidates) {
+                                if (btn.children.length > 3) continue;
+                                const text = (btn.innerText || '').trim().toLowerCase();
+                                if (text !== 'view more' && text !== 'show more' && text !== 'see more') continue;
+                                const btnY = btn.getBoundingClientRect().top + window.scrollY;
+                                // Must be above regulatory info (or if no regulatory, in lower half of page)
+                                if (btnY < regulatoryY && btnY > bestY) {
+                                    bestBtn = btn;
+                                    bestY = btnY;
                                 }
-                                sibling = sibling.nextElementSibling;
+                            }
+
+                            if (bestBtn) {
+                                bestBtn.scrollIntoView({block: 'center'});
+                                bestBtn.click();
+                                return 'view more (above regulatory, y=' + Math.round(bestY) + ')';
                             }
                             return false;
                         }
                         """)
                         if clicked_vm:
-                            log.info("      Desc: clicked '%s' button", str(clicked_vm)[:40])
+                            log.info("      Desc: clicked '%s'", str(clicked_vm)[:60])
                         detail_tab.wait_for_timeout(2000)
                     except Exception:
                         pass
