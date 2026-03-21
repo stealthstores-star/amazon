@@ -640,7 +640,11 @@ DETAIL_EXTRACT_JS = """
             const el = document.querySelector(sel);
             if (el) {
                 const t = el.innerText.trim();
-                if (t.length > 20) {
+                // Skip garbage header/button text
+                const stripped = t.toLowerCase().replace(/[^a-z]/g, '');
+                if (stripped === 'description' || stripped === 'descriptionreportviewmore'
+                    || stripped === 'descriptionviewmore' || stripped === 'viewmore') continue;
+                if (t.length > 50) {
                     result.description = t.substring(0, 2000);
                     break;
                 }
@@ -1031,6 +1035,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             # Strategy 3: Use AliExpress API to get description HTML
 
             # Strategy 1: Search ALL page source for any desc URL (broader search)
+            log.info("      Desc: trying Strategy 1 (descriptionUrl in page source)...")
             try:
                 desc_url = detail_tab.evaluate("""
                 () => {
@@ -1083,6 +1088,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
 
             # Strategy 2: Scroll down and extract description from DOM
             if not desc_text:
+                log.info("      Desc: trying Strategy 2 (scroll + DOM extraction)...")
                 try:
                     # Scroll to bottom to trigger lazy-loading of description
                     detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -1090,19 +1096,21 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
 
                     # Try clicking Description tab if it exists
                     try:
-                        detail_tab.evaluate("""
+                        clicked = detail_tab.evaluate("""
                         () => {
                             const tabs = document.querySelectorAll('[class*="tab"], [role="tab"], [class*="Tab"]');
                             for (const tab of tabs) {
                                 const text = (tab.innerText || '').trim().toLowerCase();
                                 if (text.includes('description')) {
                                     tab.click();
-                                    return true;
+                                    return text;
                                 }
                             }
                             return false;
                         }
                         """)
+                        if clicked:
+                            log.info("      Desc: clicked tab '%s'", str(clicked)[:40])
                         detail_tab.wait_for_timeout(1500)
                     except Exception:
                         pass
@@ -1125,6 +1133,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                             '[data-pl="product-description"]',
                         ];
 
+                        const found = [];
                         for (const sel of descSelectors) {
                             try {
                                 const el = document.querySelector(sel);
@@ -1132,14 +1141,18 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     const clone = el.cloneNode(true);
                                     clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
                                     let text = clone.innerText.trim();
-                                    if (text.length > 20) {
-                                        const lower = text.toLowerCase();
-                                        for (const cut of ['additional regulatory', 'regulatory information',
-                                                           'shipping info', 'return policy']) {
-                                            const idx = lower.indexOf(cut);
-                                            if (idx > 0) { text = text.substring(0, idx).trim(); break; }
-                                        }
-                                        return text.substring(0, 3000);
+                                    // Filter out garbage: just header/button text
+                                    const lower = text.toLowerCase().replace(/[^a-z]/g, '');
+                                    if (lower === 'description' || lower === 'descriptionreportviewmore'
+                                        || lower === 'descriptionviewmore' || lower === 'viewmore'
+                                        || text.length < 50) continue;
+                                    for (const cut of ['additional regulatory', 'regulatory information',
+                                                       'shipping info', 'return policy']) {
+                                        const idx = text.toLowerCase().indexOf(cut);
+                                        if (idx > 0) { text = text.substring(0, idx).trim(); break; }
+                                    }
+                                    if (text.length >= 50) {
+                                        found.push({sel: sel, len: text.length, text: text.substring(0, 3000)});
                                     }
                                 }
                             } catch(e) {}
@@ -1154,19 +1167,37 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                     const clone = doc.body.cloneNode(true);
                                     clone.querySelectorAll('img, script, style').forEach(e => e.remove());
                                     let text = clone.innerText.trim();
-                                    if (text.length > 20) return text.substring(0, 3000);
+                                    if (text.length >= 50) {
+                                        found.push({sel: 'iframe', len: text.length, text: text.substring(0, 3000)});
+                                    }
                                 }
                             } catch(e) {}
                         }
 
+                        // Return the longest match (most likely to be real content)
+                        if (found.length > 0) {
+                            found.sort((a, b) => b.len - a.len);
+                            return JSON.stringify({sel: found[0].sel, text: found[0].text, total: found.length});
+                        }
                         return '';
                     }
                     """) or ""
+
+                    if desc_text:
+                        try:
+                            import json as _json
+                            parsed = _json.loads(desc_text)
+                            log.info("      Desc Strategy 2: found %d matches, best from '%s' (%d chars)",
+                                     parsed.get("total", 0), parsed.get("sel", "?"), len(parsed.get("text", "")))
+                            desc_text = parsed.get("text", "")
+                        except Exception:
+                            pass  # If not JSON, keep as-is
                 except Exception as e:
-                    log.debug("      Description DOM extraction error: %s", str(e)[:80])
+                    log.info("      Description DOM extraction error: %s", str(e)[:120])
 
             # Strategy 3: Try AliExpress product description API
             if not desc_text and product_id:
+                log.info("      Desc: trying Strategy 3 (API: /fn/item-description)...")
                 try:
                     api_url = f"https://www.aliexpress.com/fn/item-description/index.html?productId={product_id}"
                     desc_text = detail_tab.evaluate("""
