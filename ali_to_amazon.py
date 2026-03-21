@@ -1045,10 +1045,12 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             # Strategy 2: Scroll to description section and extract from DOM
             # Strategy 3: Use AliExpress API to get description HTML
 
-            # Strategy 1: Search page source + global JS objects for description URL
-            log.info("      Desc: trying Strategy 1 (descriptionUrl in page source)...")
-            try:
-                desc_url = detail_tab.evaluate("""
+            # Strategy 1: Search page source for description URL (skip if cache exists)
+            desc_url = ""
+            if not _cached_moduleanalysis_url:
+                log.info("      Desc: trying Strategy 1 (descriptionUrl in page source)...")
+                try:
+                    desc_url = detail_tab.evaluate("""
                 () => {
                     // First check global JS data objects that AliExpress uses
                     const globals = [
@@ -1090,11 +1092,11 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     if (descContext) return '__DEBUG__:' + descContext[0].substring(0, 200);
 
                     return '';
-                }
-                """) or ""
-            except Exception as e:
-                log.info("      Desc Strategy 1 error: %s", str(e)[:120])
-                desc_url = ""
+                    }
+                    """) or ""
+                except Exception as e:
+                    log.info("      Desc Strategy 1 error: %s", str(e)[:120])
+                    desc_url = ""
 
             if desc_url and desc_url.startswith("__DEBUG__:"):
                 log.info("      Desc Strategy 1 debug (no URL, but found context): %s", desc_url[10:200])
@@ -1284,8 +1286,8 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-            # Strategy 3: Extract description from page's embedded JSON data (non-destructive)
-            if not desc_text:
+            # Strategy 3: Extract description from page's embedded JSON data (skip if cache exists)
+            if not desc_text and not _cached_moduleanalysis_url:
                 log.info("      Desc: trying Strategy 3 (embedded page JSON)...")
                 try:
                     desc_text = detail_tab.evaluate("""
@@ -2108,25 +2110,7 @@ def handle_captcha(tab):
     except Exception:
         pass
 
-    # Try auto-solve (slider drag, simple button clicks — NOT image challenges)
-    auto_att = 0
-    while is_captcha(tab) and auto_att < 3:
-        if try_solve_captcha(tab):
-            auto_att += 1
-            tab.wait_for_timeout(2000)
-            # For AliExpress slider/button CAPTCHAs, a reload may help confirm
-            if is_captcha(tab):
-                try:
-                    tab.reload(wait_until="domcontentloaded", timeout=15000)
-                except Exception:
-                    pass
-                tab.wait_for_timeout(1000)
-        else:
-            break
-    if not is_captcha(tab):
-        log.info("  CAPTCHA auto-solved!")
-        return
-    # Manual solve needed — user must solve image challenge or other CAPTCHA
+    # Wait for user to solve — no auto-solve attempts, no reloads
     log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
     print("\a", flush=True)
     while is_captcha(tab):
@@ -2175,33 +2159,11 @@ def wait_ready(tab, target):
                 pass
             continue
         if is_captcha(tab):
-            # Try auto-solve first (checkbox, slider, button)
-            auto_attempts = 0
-            while is_captcha(tab) and auto_attempts < 3:
-                if try_solve_captcha(tab):
-                    auto_attempts += 1
-                    # Reload to check if solve worked
-                    try:
-                        tab.reload(wait_until="domcontentloaded", timeout=15000)
-                    except Exception:
-                        pass
-                    tab.wait_for_timeout(1000)
-                else:
-                    break
-            if is_captcha(tab):
-                # Auto-solve failed — ask user (do NOT reload while they solve)
-                log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
-                print("\a", flush=True)
-                poll_count = 0
-                while is_captcha(tab):
-                    tab.wait_for_timeout(2000)
-                    poll_count += 1
-                    # Periodically reload to detect the solve
-                    if poll_count % 3 == 0:
-                        try:
-                            tab.reload(wait_until="domcontentloaded", timeout=15000)
-                        except Exception:
-                            pass
+            # Wait for user to solve — no auto-solve, no reloads
+            log.warning(">>> CAPTCHA detected! Solve it in the browser window. <<<")
+            print("\a", flush=True)
+            while is_captcha(tab):
+                tab.wait_for_timeout(3000)
             log.info(">>> CAPTCHA solved! Reloading target... <<<")
             try:
                 tab.goto(target, wait_until="domcontentloaded", timeout=30000)
