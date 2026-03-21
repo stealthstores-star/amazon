@@ -1320,26 +1320,46 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                     except Exception:
                         pass
 
-                    # Wait for description content to actually load (poll up to 5 seconds)
+                    # Wait for description content to load, with diagnostics
                     for _poll in range(5):
-                        has_content = detail_tab.evaluate("""
+                        diag = detail_tab.evaluate("""
                         () => {
+                            const results = {};
                             const sels = ['.product-description', '.detailmodule_html',
+                                '.detail-desc-decorate-richtext',
                                 '[class*="product-description"]', '[class*="detail-desc"]'];
                             for (const sel of sels) {
                                 const els = document.querySelectorAll(sel);
+                                const info = [];
                                 for (const el of els) {
-                                    if (el.innerText && el.innerText.trim().length > 50) return true;
-                                    if (el.querySelectorAll('img').length > 0) return true;
+                                    const text = (el.innerText || '').trim();
+                                    const imgs = el.querySelectorAll('img').length;
+                                    info.push({text: text.length, imgs: imgs, html: el.innerHTML.length});
                                 }
+                                if (info.length > 0) results[sel] = info;
                             }
-                            return false;
+                            return JSON.stringify(results);
                         }
                         """)
-                        if has_content:
-                            log.info("      Desc: content loaded after %d polls", _poll + 1)
-                            break
-                        detail_tab.wait_for_timeout(1000)
+                        log.info("      Desc poll %d: %s", _poll + 1, diag[:300])
+                        try:
+                            import json as _json2
+                            parsed_diag = _json2.loads(diag)
+                            for sel, infos in parsed_diag.items():
+                                for info in infos:
+                                    if info.get("text", 0) > 50 or info.get("imgs", 0) > 0:
+                                        log.info("      Desc: content found in '%s' (text=%d, imgs=%d)",
+                                                 sel, info["text"], info["imgs"])
+                                        break
+                                else:
+                                    continue
+                                break
+                            else:
+                                detail_tab.wait_for_timeout(1000)
+                                continue
+                            break  # Content found, stop polling
+                        except Exception:
+                            detail_tab.wait_for_timeout(1000)
 
                     # Extract text and images from the now-expanded description
                     desc_result = detail_tab.evaluate("""
