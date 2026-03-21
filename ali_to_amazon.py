@@ -866,6 +866,20 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
     }
 
     try:
+        # Set up early network listener to catch moduleanalysis URL during page load
+        # This is how store 1 works — we want ALL stores to work the same way
+        _early_captured_module_url = []
+        def _early_on_response(response):
+            try:
+                url = response.url
+                if "moduleanalysis" in url and response.status == 200:
+                    _early_captured_module_url.append(url)
+                elif "desc" in url.lower() and ("json" in (response.headers.get("content-type", "") or "")) and response.status == 200:
+                    _early_captured_module_url.append(url)
+            except Exception:
+                pass
+        detail_tab.on("response", _early_on_response)
+
         detail_tab.goto(product_url, wait_until="commit", timeout=12000)
         # Close any popup tabs that AliExpress opened (keep main + detail)
         if context:
@@ -1044,9 +1058,29 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
             desc_text = ""
 
             # --- DESCRIPTION EXTRACTION ---
-            # Strategy 1: Find descriptionUrl in page source and fetch it
-            # Strategy 2: Scroll to description section and extract from DOM
-            # Strategy 3: Use AliExpress API to get description HTML
+
+            # FIRST: If we don't have a cached moduleanalysis URL yet, scroll down
+            # to trigger lazy-loading of the description section. This fires the
+            # moduleanalysis network request on most stores — the same approach
+            # that made store 1 work perfectly.
+            if not _cached_moduleanalysis_url:
+                try:
+                    # Scroll to bottom to trigger description lazy load
+                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6)")
+                    detail_tab.wait_for_timeout(800)
+                    detail_tab.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    detail_tab.wait_for_timeout(1200)
+                    # Check if the early listener caught a moduleanalysis URL
+                    if _early_captured_module_url:
+                        _cached_moduleanalysis_url = _early_captured_module_url[0]
+                        log.info("      Desc: caught moduleanalysis URL during page load: %s", _cached_moduleanalysis_url[:120])
+                except Exception:
+                    pass
+            # Remove early listener
+            try:
+                detail_tab.remove_listener("response", _early_on_response)
+            except Exception:
+                pass
 
             # If we already know which strategy works for this store, try it first
             # and skip slow strategies (especially Strategy 4's 2s+ wait)
