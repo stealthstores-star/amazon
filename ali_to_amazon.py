@@ -644,10 +644,9 @@ DETAIL_EXTRACT_JS = """
     ];
     for (const sel of descSels) {
         try {
-            const el = document.querySelector(sel);
-            if (el) {
+            const allEls = document.querySelectorAll(sel);
+            for (const el of allEls) {
                 const t = el.innerText.trim();
-                // Skip garbage header/button text
                 const stripped = t.toLowerCase().replace(/[^a-z]/g, '');
                 if (stripped === 'description' || stripped === 'descriptionreportviewmore'
                     || stripped === 'descriptionviewmore' || stripped === 'viewmore') continue;
@@ -657,6 +656,7 @@ DETAIL_EXTRACT_JS = """
                 }
             }
         } catch(e) {}
+        if (result.description) break;
     }
     // Strategy 2: Specifications / attributes table
     if (!result.description || result.description.length < 50) {
@@ -1341,7 +1341,9 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                         const found = [];
                         for (const sel of descSelectors) {
                             try {
-                                const el = document.querySelector(sel);
+                                // Use querySelectorAll — first match may be an empty wrapper
+                                const allEls = document.querySelectorAll(sel);
+                                for (const el of allEls) {
                                 if (!el) continue;
                                 const clone = el.cloneNode(true);
                                 clone.querySelectorAll('img, script, style, video, iframe').forEach(e => e.remove());
@@ -1369,6 +1371,7 @@ def scrape_product_detail(detail_tab, product_url, product_id, context=None, mai
                                         text: text.length >= 50 ? text.substring(0, 3000) : '',
                                         img: firstImg});
                                 }
+                                } // end for (const el of allEls)
                             } catch(e) {}
                         }
                         if (found.length === 0) return '';
