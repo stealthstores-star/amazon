@@ -2098,54 +2098,102 @@ def make_bullets(title):
 
 
 def _extract_specs_from_ali_desc(ali_desc):
-    """Extract useful specifications and features from AliExpress description text."""
+    """Extract useful specifications from AliExpress description text.
+
+    Returns two lists: (specs_dict, feature_sentences)
+      - specs_dict: key-value pairs like {"Material": "Resin", "Height": "15cm"}
+      - feature_sentences: clean descriptive sentences about the product
+    """
     if not ali_desc:
-        return []
-    specs = []
+        return {}, []
+    specs = {}
+    features = []
     lines = ali_desc.replace('|', '\n').split('\n')
-    # Common spec patterns to extract
-    spec_patterns = [
-        r'(?:material|made\s+(?:of|from))\s*[:\-]?\s*(.+)',
-        r'(?:size|dimensions?|height|width|length)\s*[:\-]?\s*(.+)',
-        r'(?:weight)\s*[:\-]?\s*(.+)',
-        r'(?:scale)\s*[:\-]?\s*(.+)',
-        r'(?:colour|color)\s*[:\-]?\s*(.+)',
-        r'(?:package\s+includes?|includes?|contents?)\s*[:\-]?\s*(.+)',
-        r'(?:suitable\s+for|fits?|compatible)\s*[:\-]?\s*(.+)',
-        r'(\d+\s*(?:cm|mm|inch|pcs|pieces|parts)[\w\s]*)',
+
+    # Spam filter
+    spam_words = ['aliexpress', 'ali express', 'wholesale', 'dropship',
+                  'free shipping', 'buy now', 'click here', 'add to cart',
+                  'hot sale', 'best seller', 'factory direct', 'cheap',
+                  'wish list', 'feedback', 'store', 'shop now', 'lowest price',
+                  'order now', 'limited time', 'flash sale', 'coupon',
+                  'customer service', 'dear friend', 'dear buyer', 'note:',
+                  'please note', 'warm tips', 'kindly note', 'reminder']
+
+    # Spec extraction patterns — map to clean labels
+    spec_labels = [
+        (r'(?:material|made\s+(?:of|from))\s*[:\-]?\s*(.+)', 'Material'),
+        (r'(?:size|dimensions?)\s*[:\-]?\s*(.+)', 'Size'),
+        (r'(?:height)\s*[:\-]?\s*(.+)', 'Height'),
+        (r'(?:width)\s*[:\-]?\s*(.+)', 'Width'),
+        (r'(?:length)\s*[:\-]?\s*(.+)', 'Length'),
+        (r'(?:weight)\s*[:\-]?\s*(.+)', 'Weight'),
+        (r'(?:scale)\s*[:\-]?\s*(.+)', 'Scale'),
+        (r'(?:colou?r)\s*[:\-]?\s*(.+)', 'Colour'),
+        (r'(?:package\s+includes?|includes?|contents?|what.s in the box)\s*[:\-]?\s*(.+)', 'Includes'),
+        (r'(?:suitable\s+for|recommended\s+(?:for|age))\s*[:\-]?\s*(.+)', 'Suitable For'),
+        (r'(?:brand)\s*[:\-]?\s*(.+)', 'Brand'),
+        (r'(?:type|style)\s*[:\-]?\s*(.+)', 'Type'),
+        (r'(?:number\s+of\s+pieces|pieces|parts)\s*[:\-]?\s*(.+)', 'Pieces'),
     ]
-    seen = set()
+
+    seen_keys = set()
+    seen_features = set()
+
     for line in lines:
         line = line.strip()
         if not line or len(line) < 5 or len(line) > 300:
             continue
         low = line.lower()
-        # Skip AliExpress marketing spam
-        if any(w in low for w in ['aliexpress', 'ali express', 'wholesale', 'dropship',
-                                   'free shipping', 'buy now', 'click here', 'add to cart',
-                                   'hot sale', 'best seller', 'factory direct', 'cheap',
-                                   'wish list', 'feedback', 'store', 'shop now']):
+
+        # Skip spam
+        if any(w in low for w in spam_words):
             continue
-        for pat in spec_patterns:
+        # Skip lines that are mostly punctuation, caps-lock shouting, or prices
+        if re.search(r'[!]{2,}|[$€£¥]\s*\d|http|www\.|\.com|\.cn|@', line):
+            continue
+
+        # Try to extract as a spec key-value pair
+        matched_spec = False
+        for pat, label in spec_labels:
             m = re.search(pat, line, re.IGNORECASE)
-            if m:
-                val = m.group(0).strip().rstrip(':').rstrip('-')
-                if val.lower() not in seen and len(val) > 3:
-                    seen.add(val.lower())
-                    specs.append(val)
+            if m and label not in seen_keys:
+                val = m.group(1).strip().rstrip(':').rstrip('-').rstrip('.')
+                # Clean up the value
+                val = re.sub(r'\s+', ' ', val)
+                if val and len(val) > 1 and len(val) < 150:
+                    specs[label] = val
+                    seen_keys.add(label)
+                matched_spec = True
                 break
-        else:
-            # Keep informative lines that describe the product (not marketing)
-            if 10 < len(line) < 200 and not re.search(r'[!]{2,}|[$€£¥]|\d{5,}|http|www\.|\.com', line):
-                key = line.lower()[:40]
-                if key not in seen:
-                    seen.add(key)
-                    specs.append(line)
-    return specs[:15]  # Cap at 15 useful specs
+
+        # Also catch "Key: Value" format directly
+        if not matched_spec:
+            kv = re.match(r'^([A-Za-z][A-Za-z\s]{2,20})\s*[:\-]\s*(.{2,100})$', line)
+            if kv:
+                key = kv.group(1).strip().title()
+                val = kv.group(2).strip().rstrip('.')
+                if key not in seen_keys and not any(w in key.lower() for w in spam_words):
+                    specs[key] = val
+                    seen_keys.add(key)
+                    matched_spec = True
+
+        # Keep as a feature sentence if informative
+        if not matched_spec and 15 < len(line) < 200:
+            # Must look like a real sentence or description, not a header/label
+            feat_key = line.lower()[:40]
+            if feat_key not in seen_features:
+                seen_features.add(feat_key)
+                features.append(line)
+
+    return specs, features[:8]
 
 
 def make_description(title, ali_description=None):
-    """Generate a detailed Amazon description using AliExpress source description when available."""
+    """Generate a clean, easy-to-read Amazon product description.
+
+    Uses the scraped AliExpress description to extract real product specs
+    and features, then rewrites them in a professional format for Amazon.
+    """
     clean = clean_title(title)
     text = title.lower()
     scale = _detect_scale(title)
@@ -2153,53 +2201,78 @@ def make_description(title, ali_description=None):
     material = _detect_material(title)
     num = _detect_num_pieces(title)
 
-    parts = [clean + "."]
+    sections = []
 
-    # Opening based on theme
+    # --- Section 1: Product overview (2-3 sentences) ---
+    overview = clean + "."
     if "Military" in theme:
-        parts.append(f"This {material.lower()} model kit captures the detail and character of military history.")
+        overview += f" This {material.lower()} model kit captures the detail and character of military history."
     elif "Fantasy" in theme:
-        parts.append(f"This {material.lower()} fantasy model kit features intricate sculpting and dynamic posing.")
+        overview += f" This {material.lower()} fantasy model kit features intricate sculpting and dynamic posing."
     elif "Diorama" in theme:
-        parts.append(f"These miniature figures are perfect for creating vivid, lifelike diorama scenes.")
+        overview += " These miniature figures are perfect for creating vivid, lifelike diorama scenes."
     elif "Historical" in theme:
-        parts.append(f"This historically inspired {material.lower()} figure captures the period with authentic detail.")
+        overview += f" This historically inspired {material.lower()} figure captures the period with authentic detail."
     elif "Anime" in theme:
-        parts.append(f"This premium {material.lower()} collectible statue features high-quality sculpting and finish.")
+        overview += f" This premium {material.lower()} collectible statue features high-quality sculpting and finish."
     elif "Sports" in theme:
-        parts.append(f"A fun and detailed collectible figure for sports fans and figure collectors alike.")
+        overview += " A fun and detailed collectible figure for sports fans and figure collectors alike."
     else:
-        parts.append(f"This {material.lower()} model kit features carefully sculpted details for an impressive display piece.")
+        overview += f" This {material.lower()} model kit features carefully sculpted details for an impressive display piece."
+    sections.append(overview)
 
-    # Extract and incorporate specs from AliExpress description
-    ali_specs = _extract_specs_from_ali_desc(ali_description)
-    if ali_specs:
-        # Group specs into a product details section
-        spec_lines = []
-        for spec in ali_specs:
-            # Clean up the spec line for Amazon (capitalize, remove trailing punctuation)
-            spec = spec.strip().rstrip('.')
-            if spec:
-                spec_lines.append(spec)
-        if spec_lines:
-            parts.append("Product Details: " + ". ".join(spec_lines[:8]) + ".")
+    # Extract real specs from AliExpress description
+    ali_specs, ali_features = _extract_specs_from_ali_desc(ali_description)
 
-    # Scale info
-    if scale:
-        parts.append(f"Built to {scale} scale, this model is compatible with other figures and accessories in the same scale range.")
+    # --- Section 2: Key specifications (if available) ---
+    # Build a clean spec list from both AliExpress data and title-detected info
+    spec_items = []
+    if material and "Material" not in ali_specs:
+        spec_items.append(f"Material: {material}")
+    if scale and "Scale" not in ali_specs:
+        spec_items.append(f"Scale: {scale}")
+    if num > 1 and "Pieces" not in ali_specs:
+        spec_items.append(f"Pieces: {num}")
+    # Add AliExpress specs
+    for label, val in ali_specs.items():
+        spec_items.append(f"{label}: {val}")
+    if spec_items:
+        # Format as a clean readable list using " // " separator (Amazon strips HTML)
+        sections.append("Specifications: " + " // ".join(spec_items[:10]))
 
-    # Kit details
+    # --- Section 3: Features from AliExpress description ---
+    if ali_features:
+        # Clean up and present as readable sentences
+        clean_features = []
+        for feat in ali_features[:4]:
+            # Capitalise first letter, ensure ends with full stop
+            feat = feat.strip()
+            if feat:
+                feat = feat[0].upper() + feat[1:]
+                if not feat.endswith('.'):
+                    feat += '.'
+                clean_features.append(feat)
+        if clean_features:
+            sections.append(" ".join(clean_features))
+
+    # --- Section 4: Kit details ---
+    kit_info = []
     if "unpainted" in text or "unassembled" in text:
-        parts.append("Supplied unassembled and unpainted, giving you complete freedom to bring this model to life with your own colour scheme and finishing techniques.")
+        kit_info.append("Supplied unassembled and unpainted, giving you complete freedom to bring this model to life with your own colour scheme and finishing techniques.")
     if num > 1:
-        parts.append(f"This set includes {num} individual figures, each with their own unique pose and character detail.")
+        kit_info.append(f"This set includes {num} individual figures, each with their own unique pose and character detail.")
+    if kit_info:
+        sections.append(" ".join(kit_info))
 
-    # Closing
-    parts.append(f"Crafted from high-quality {material.lower()} for sharp detail and durability.")
-    parts.append("An excellent choice for collectors, painters, and hobbyists looking for their next project or display piece.")
-    parts.append("Please refer to the product images for a detailed view of the model and its features.")
+    # --- Section 5: Closing ---
+    closing = f"Crafted from high-quality {material.lower()} for sharp detail and durability."
+    closing += " An excellent choice for collectors, painters, and hobbyists."
+    closing += " Please refer to the product images for full detail."
+    sections.append(closing)
 
-    return " ".join(parts)
+    # Join sections with line breaks for readability
+    # Amazon flat file accepts newlines in description
+    return "\n\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
