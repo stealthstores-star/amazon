@@ -3328,7 +3328,7 @@ def post_process(csv_path):
             except Exception:
                 results[idx] = None
             done = len(results)
-            if done % 20 == 0:
+            if done % 50 == 0:
                 log.info("    Processed %d / %d images...", done, len(upload_tasks))
 
     # Apply results back to rows
