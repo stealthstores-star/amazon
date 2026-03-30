@@ -9,7 +9,6 @@ from datetime import datetime
 import openpyxl
 
 # Pricing config (same as ali_to_amazon.py)
-DEFAULT_PRICE_GBP = 12.99
 TARGET_PROFIT_MARGIN = 0.30
 AMAZON_REFERRAL_FEE = 0.1545
 AMAZON_PER_ITEM_FEE = 0.75
@@ -34,12 +33,12 @@ def parse_price(price_str):
 
 def ali_to_gbp(price_usd):
     if not price_usd:
-        return DEFAULT_PRICE_GBP
+        return None
     cost_gbp = price_usd * USD_TO_GBP
     total_cost = cost_gbp + ALI_SHIPPING_ESTIMATE
     denominator = 1 - AMAZON_REFERRAL_FEE - TARGET_PROFIT_MARGIN
     if denominator <= 0:
-        return DEFAULT_PRICE_GBP
+        return None
     sell_price = (total_cost + AMAZON_PER_ITEM_FEE) / denominator
     sell_price = round(sell_price, 2)
     actual_profit = sell_price - (sell_price * AMAZON_REFERRAL_FEE) - AMAZON_PER_ITEM_FEE - total_cost
@@ -144,10 +143,15 @@ def main():
         f.write("\t".join(row2_vals) + "\n")
         f.write("\t".join(row3_vals) + "\n")
 
+        skipped = 0
         for sku in all_skus:
             price_str = sku_prices.get(sku, "")
             price_usd = parse_price(price_str)
             sell_price = ali_to_gbp(price_usd)
+            if sell_price is None:
+                print(f"  SKIP {sku}: no source price found")
+                skipped += 1
+                continue
 
             row_data = []
             for field, c in offer_cols:
@@ -180,7 +184,9 @@ def main():
             f.write("\t".join(row_data) + "\n")
 
     print(f"\nDone! Generated: {output_name}")
-    print(f"  {len(all_skus)} SKUs with PartialUpdate + offer data")
+    print(f"  {len(all_skus) - skipped} SKUs with PartialUpdate + offer data")
+    if skipped:
+        print(f"  {skipped} SKUs skipped (no source price found)")
     print(f"\nUpload this file via: Catalogue > Add Products via Upload")
     print(f"This will add offer/price data to your existing listings.")
 

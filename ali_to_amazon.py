@@ -48,7 +48,6 @@ log = logging.getLogger("scraper")
 # CONFIGURATION
 # ---------------------------------------------------------------------------
 MARKUP = 3.0
-DEFAULT_PRICE_GBP = 12.99
 BROWSE_NODE = "364155031"       # Amazon UK: Action & Toy Figures
 PRODUCT_TYPE = "toyfigure"
 BRAND = "Generic"
@@ -2237,7 +2236,7 @@ def ali_to_gbp(price_val, shipping_str=None):
             — whichever gives the higher sell price.
     """
     if not price_val:
-        return DEFAULT_PRICE_GBP
+        return None
     cost_gbp = price_val  # Already in GBP — no conversion needed
     # Shipping is already in GBP from AliExpress (e.g. "3.52", "Free")
     shipping_gbp = 0.0
@@ -2257,7 +2256,7 @@ def ali_to_gbp(price_val, shipping_str=None):
     # sell >= (per_item + sourcing_cost) / (1 - referral - 0.30)
     denom_margin = 1 - AMAZON_REFERRAL_FEE - TARGET_PROFIT_MARGIN
     if denom_margin <= 0:
-        return DEFAULT_PRICE_GBP
+        return None
     price_for_margin = (AMAZON_PER_ITEM_FEE + sourcing_cost) / denom_margin
 
     # --- Price for £7.50 minimum profit ---
@@ -2875,7 +2874,9 @@ def _load_all_existing_sku_prices():
                         if sku not in prices:
                             price_gbp = parse_price(row.get("product_price", ""))
                             shipping = row.get("shipping", "")
-                            prices[sku] = ali_to_gbp(price_gbp, shipping_str=shipping)
+                            calculated = ali_to_gbp(price_gbp, shipping_str=shipping)
+                            if calculated is not None:
+                                prices[sku] = calculated
             except Exception:
                 pass
 
@@ -2954,6 +2955,9 @@ def fill_amazon_template(template_path, products):
         price_gbp = parse_price(price_str)
         shipping_str = product.get("shipping", "")
         sell_price = ali_to_gbp(price_gbp, shipping_str=shipping_str)
+        if sell_price is None:
+            log.warning("  SKIP no price: %s", raw_title[:80])
+            continue
         ali_desc = product.get("ali_description", "")
         bullets = make_bullets(title)
         description = make_description(title, ali_description=ali_desc)
@@ -3415,8 +3419,8 @@ def fill_amazon_template(template_path, products):
         for r in range(start_row, start_row + filled):
             sku_val = ws_copy_data.get((r, sku_col_idx), "") if sku_col_idx else ""
             price_val = ws_copy_data.get((r, price_col_idx), "") if price_col_idx else ""
-            if sku_val and str(sku_val).startswith("ALI-"):
-                offer_sku_prices[str(sku_val)] = str(price_val) if price_val else str(DEFAULT_PRICE_GBP)
+            if sku_val and str(sku_val).startswith("ALI-") and price_val:
+                offer_sku_prices[str(sku_val)] = str(price_val)
 
         # Also load ALL existing SKUs from previous uploads/offer files/CSVs
         existing_prices = _load_all_existing_sku_prices()
