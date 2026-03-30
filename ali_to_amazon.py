@@ -2974,7 +2974,14 @@ def fill_amazon_template(template_path, products):
         title = clean_title(raw_title)
 
         # Skip products with trademarked brand/player/team names (error 18653)
-        if _has_trademark_risk(raw_title) or _has_trademark_risk(title):
+        # Check ALL available text: title, description, store name, variation names, image URLs
+        ali_desc_check = product.get("ali_description", "") or ""
+        detail_desc_check = product.get("detail_description", "") or ""
+        store_name_check = product.get("store_name", "") or ""
+        variations_check = product.get("variations", "") or ""
+        images_check = " ".join(product.get("product_images", "").split(",") if product.get("product_images") else [])
+        all_text = f"{raw_title} {ali_desc_check} {detail_desc_check} {store_name_check} {variations_check} {images_check}"
+        if _has_trademark_risk(all_text):
             log.warning(f"  SKIP trademark risk: {raw_title[:80]}")
             continue
 
@@ -3539,9 +3546,23 @@ def post_process(csv_path):
     dupes = original_count - len(unique_rows)
     log.info("  %d products -> %d unique (%d duplicates removed)", original_count, len(unique_rows), dupes)
 
-    # --- Step 2: Use all products (no filtering) ---
-    log.info("Step 2: %d products to process", len(unique_rows))
-    product_rows = unique_rows
+    # --- Step 2: Filter out trademark/copyright risk products ---
+    safe_rows = []
+    trademark_skipped = 0
+    for row in unique_rows:
+        title = row.get("product_title", "")
+        desc = row.get("ali_description", "") or row.get("detail_description", "") or ""
+        store = row.get("store_name", "") or ""
+        variations = row.get("variations", "") or ""
+        images = row.get("product_images", "") or ""
+        all_text = f"{title} {desc} {store} {variations} {images}"
+        if _has_trademark_risk(all_text):
+            log.warning("  SKIP trademark: %s", title[:80])
+            trademark_skipped += 1
+        else:
+            safe_rows.append(row)
+    log.info("Step 2: %d products (%d trademark risks skipped)", len(safe_rows), trademark_skipped)
+    product_rows = safe_rows
 
     # --- Step 3: Rehost ALL images (parallel) ---
     log.info("Step 3: Rehosting images (Amazon-compatible JPEG hosting)...")
