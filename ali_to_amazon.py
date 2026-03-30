@@ -2310,6 +2310,22 @@ def _has_trademark_risk(title):
         # Military branches (flagged as brands)
         r'u\.?s\.?\s*army', r'u\.?s\.?\s*navy', r'usmc', r'navy\s*seals?',
         r'devgru', r'delta\s*force', r'sas\b',
+        # Copyright image violations — Amazon detects these from images too
+        r'john\s*wick', r'supergirl', r'supernatural', r'helldivers?',
+        r'peaky\s*blinder', r'mandalorian', r'baby\s*yoda', r'grogu',
+        r'boba\s*fett', r'darth\s*vader', r'stormtrooper',
+        r'goku', r'vegeta', r'frieza', r'saiyan', r'kamehameha',
+        r'luffy', r'zoro', r'sanji',
+        r'witcher', r'geralt', r'ciri',
+        r'resident\s*evil', r'leon\s*kennedy', r'jill\s*valentine',
+        r'tomb\s*raider', r'lara\s*croft',
+        r'mortal\s*kombat', r'street\s*fighter',
+        r'final\s*fantasy', r'cloud\s*strife',
+        r'overwatch', r'call\s*of\s*duty', r'halo\b',
+        r'doom\s*slayer', r'doom\s*guy',
+        r'assassin.?s\s*creed', r'elden\s*ring',
+        r'cyberpunk\s*2077', r'metal\s*gear',
+        r'world\s*of\s*warcraft', r'warcraft',
     ]
     title_lower = title.lower()
     for term in TRADEMARK_TERMS:
