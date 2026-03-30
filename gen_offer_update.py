@@ -73,6 +73,12 @@ def main():
         'fulfillment_availability#1.quantity',
         'fulfillment_availability#1.lead_time_to_ship_max_days',
         'purchasable_offer[marketplace_id=a1f83g8c2aro7p]#1.our_price#1.schedule#1.value_with_tax',
+        # Required listing fields — Amazon won't activate offers on
+        # listings missing these, even if the offer data is accepted.
+        'country_of_origin',
+        'batteries_required',
+        'are_batteries_included',
+        'supplier_declared_dg_hz_regulation1',
     ]
 
     offer_cols = []
@@ -161,6 +167,14 @@ def main():
                     row_data.append('7')
                 elif 'our_price' in field:
                     row_data.append(str(sell_price))
+                elif field == 'country_of_origin':
+                    row_data.append('China')
+                elif field == 'batteries_required':
+                    row_data.append('No')
+                elif field == 'are_batteries_included':
+                    row_data.append('No')
+                elif 'supplier_declared_dg_hz_regulation' in field:
+                    row_data.append('Not Applicable')
                 else:
                     row_data.append('')
             f.write("\t".join(row_data) + "\n")

@@ -3337,6 +3337,13 @@ def fill_amazon_template(template_path, products):
         'fulfillment_availability#1.quantity',
         'fulfillment_availability#1.lead_time_to_ship_max_days',
         'purchasable_offer[marketplace_id=a1f83g8c2aro7p]#1.our_price#1.schedule#1.value_with_tax',
+        # Required listing fields — Amazon won't activate offers on
+        # listings that are missing these, even if the offer data itself
+        # is accepted without errors.
+        'country_of_origin',
+        'batteries_required',
+        'are_batteries_included',
+        'supplier_declared_dg_hz_regulation1',
     ]
     offer_col_indices = []
     offer_fields_found = []
@@ -3428,6 +3435,10 @@ def fill_amazon_template(template_path, products):
             'fulfillment_availability#1.fulfillment_channel_code': 'DEFAULT',
             'fulfillment_availability#1.quantity': str(QUANTITY),
             'fulfillment_availability#1.lead_time_to_ship_max_days': str(HANDLING_DAYS),
+            'country_of_origin': 'China',
+            'batteries_required': 'No',
+            'are_batteries_included': 'No',
+            'supplier_declared_dg_hz_regulation1': 'Not Applicable',
         }
         offer_name = f"amazon_offer_update_{ts}.txt"
         with open(offer_name, "w", encoding="utf-8") as f:
