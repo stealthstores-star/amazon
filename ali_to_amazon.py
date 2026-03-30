@@ -3434,7 +3434,7 @@ def fill_amazon_template(template_path, products):
         # Build a lookup from field name to its value for each SKU row
         offer_field_values = {
             'feed_product_type': PRODUCT_TYPE,
-            'update_delete': 'PartialUpdate',
+            'update_delete': 'Update',
             'condition_type': 'New',
             'fulfillment_availability#1.fulfillment_channel_code': 'DEFAULT',
             'fulfillment_availability#1.quantity': str(QUANTITY),
