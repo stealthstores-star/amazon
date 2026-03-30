@@ -160,7 +160,7 @@ def main():
                 elif field == 'item_sku':
                     row_data.append(sku)
                 elif field == 'update_delete':
-                    row_data.append('Update')
+                    row_data.append('PartialUpdate')
                 elif field == 'condition_type':
                     row_data.append('New')
                 elif 'fulfillment_channel_code' in field:

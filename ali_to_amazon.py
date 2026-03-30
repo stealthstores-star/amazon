@@ -2294,6 +2294,22 @@ def _has_trademark_risk(title):
         # Anime (commonly enforced)
         r'dragon\s*ball', r'naruto', r'one\s*piece', r'demon\s*slayer',
         r'attack\s*on\s*titan', r'jujutsu\s*kaisen', r'my\s*hero\s*academia',
+        # Movies / TV / Games — flagged by Amazon processing reports
+        r'deadpool', r'back\s*to\s*the\s*future', r'no\s*time\s*to\s*die',
+        r'james\s*bond', r'007', r'pennywise', r'judge\s*dredd',
+        r'god\s*of\s*war', r'monster\s*hunter', r'bounty\s*hunter',
+        r'predator', r'alien\s*vs', r'terminator', r'robocop',
+        r'warhammer', r'games\s*workshop', r'space\s*marine',
+        r'lord\s*of\s*the\s*rings', r'lotr', r'hobbit', r'gandalf',
+        r'wolverine', r'spider\s*man', r'spiderman', r'batman',
+        r'superman', r'iron\s*man', r'ironman', r'captain\s*america',
+        r'avengers', r'thanos', r'hulk', r'thor(?!\s*hammer)',
+        r'venom', r'joker', r'harley\s*quinn',
+        # Vehicles / Brands flagged
+        r'jeep', r'land\s*rover', r'ferrari', r'lamborghini', r'porsche',
+        # Military branches (flagged as brands)
+        r'u\.?s\.?\s*army', r'u\.?s\.?\s*navy', r'usmc', r'navy\s*seals?',
+        r'devgru', r'delta\s*force', r'sas\b',
     ]
     title_lower = title.lower()
     for term in TRADEMARK_TERMS:
@@ -2315,7 +2331,7 @@ def clean_title(title):
     title = re.sub(r'[^\w\s\-\.,&\'\"/()\[\]]', ' ', title)
     # Remove ALL prohibited Amazon phrases (case insensitive)
     prohibited = [
-        r'free\s*shipping', r'best\s*seller', r'hot\s*sale',
+        r'free\s*shipping', r'free\s*delivery', r'best\s*seller', r'hot\s*sale',
         r'hot\s*new', r'new\s*arrival', r'wholesale', r'dropship\w*',
         r'cheap', r'lowest\s*price', r'factory\s*direct',
         r'top\s*selling', r'limited\s*time', r'special\s*offer',
@@ -2323,7 +2339,10 @@ def clean_title(title):
         r'buy\s*\d+\s*get', r'aliexpress', r'ali\s*express',
         r'china\s*direct', r'from\s*china',
         r'boy\s*gift', r'girl\s*gift', r'gift\s*for\s*\w+',
+        r'track\s*package', r'super\s*cool',
     ]
+    # Remove "GK" (garage kit jargon, not useful for Amazon titles)
+    title = re.sub(r'(?i)\bGK\b', '', title)
     for phrase in prohibited:
         title = re.sub(r'(?i)\b' + phrase + r'\b', '', title)
     title = re.sub(r'\s+', ' ', title).strip()
@@ -3434,7 +3453,7 @@ def fill_amazon_template(template_path, products):
         # Build a lookup from field name to its value for each SKU row
         offer_field_values = {
             'feed_product_type': PRODUCT_TYPE,
-            'update_delete': 'Update',
+            'update_delete': 'PartialUpdate',
             'condition_type': 'New',
             'fulfillment_availability#1.fulfillment_channel_code': 'DEFAULT',
             'fulfillment_availability#1.quantity': str(QUANTITY),
