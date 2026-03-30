@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an offer-only PartialUpdate file for existing Amazon listings."""
+"""Generate an offer-only Update file for Amazon listings."""
 import csv
 import glob
 import os
@@ -160,7 +160,7 @@ def main():
                 elif field == 'item_sku':
                     row_data.append(sku)
                 elif field == 'update_delete':
-                    row_data.append('PartialUpdate')
+                    row_data.append('Update')
                 elif field == 'condition_type':
                     row_data.append('New')
                 elif 'fulfillment_channel_code' in field:
@@ -184,7 +184,7 @@ def main():
             f.write("\t".join(row_data) + "\n")
 
     print(f"\nDone! Generated: {output_name}")
-    print(f"  {len(all_skus) - skipped} SKUs with PartialUpdate + offer data")
+    print(f"  {len(all_skus) - skipped} SKUs with Update + offer data")
     if skipped:
         print(f"  {skipped} SKUs skipped (no source price found)")
     print(f"\nUpload this file via: Catalogue > Add Products via Upload")

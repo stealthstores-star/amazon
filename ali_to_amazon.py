@@ -3331,7 +3331,7 @@ def fill_amazon_template(template_path, products):
         for row_data in data_rows:
             f.write("\t".join(row_data) + "\n")
 
-    # --- Also generate offer-only PartialUpdate file ---
+    # --- Also generate offer-only Update file ---
     # Amazon often creates the product but doesn't attach the offer on first upload.
     # This separate file forces offers onto existing listings.
     offer_fields_needed = [
