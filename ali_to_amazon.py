@@ -2276,62 +2276,159 @@ def _has_trademark_risk(title):
     """Check if title contains trademarked brand/team/player names that Amazon will reject."""
     # Common trademarks that trigger error 18653 "Trademark Logo Misuse"
     TRADEMARK_TERMS = [
-        # Football/Soccer players & teams
-        r'messi', r'ronaldo', r'cr7', r'mbapp[eé]', r'mbp', r'neymar', r'haaland',
-        r'vini\s*jr', r'vinicius', r'bellingham',
-        r'emirates', r'barcelona', r'real\s*madrid', r'man\s*utd', r'manchester',
-        r'liverpool', r'chelsea', r'arsenal', r'psg', r'juventus', r'bayern',
-        # Sports leagues
-        r'fifa', r'nba', r'nfl', r'premier\s*league', r'la\s*liga', r'champions\s*league',
-        # Major brands
+        # === BRANDS & COMPANIES ===
         r'nike', r'adidas', r'puma', r'supreme', r'gucci', r'louis\s*vuitton',
         r'chanel', r'hermes', r'rolex', r'apple', r'samsung', r'sony',
         r'nintendo', r'playstation', r'xbox', r'marvel', r'dc\s*comics',
-        r'disney', r'pokemon', r'pikachu', r'star\s*wars', r'harry\s*potter',
-        r'lego', r'transformers', r'barbie', r'hot\s*wheels',
-        # Nintendo IP
-        r'zelda', r'link.*hyrule', r'hyrule', r'triforce', r'ganondorf', r'ganon',
-        # Anime (commonly enforced)
-        r'dragon\s*ball', r'naruto', r'one\s*piece', r'demon\s*slayer',
-        r'attack\s*on\s*titan', r'jujutsu\s*kaisen', r'my\s*hero\s*academia',
-        # Movies / TV / Games — flagged by Amazon processing reports
-        r'deadpool', r'back\s*to\s*the\s*future', r'no\s*time\s*to\s*die',
-        r'james\s*bond', r'007', r'pennywise', r'judge\s*dredd',
-        r'god\s*of\s*war', r'monster\s*hunter', r'bounty\s*hunter',
-        r'predator', r'alien\s*vs', r'terminator', r'robocop',
-        r'warhammer', r'games\s*workshop', r'space\s*marine',
-        r'lord\s*of\s*the\s*rings', r'lotr', r'hobbit', r'gandalf',
-        r'wolverine', r'spider\s*man', r'spiderman', r'batman',
-        r'superman', r'iron\s*man', r'ironman', r'captain\s*america',
-        r'avengers', r'thanos', r'hulk', r'thor(?!\s*hammer)',
-        r'venom', r'joker', r'harley\s*quinn',
-        # Vehicles / Brands flagged
-        r'jeep', r'land\s*rover', r'ferrari', r'lamborghini', r'porsche',
-        # Military branches (flagged as brands)
-        r'u\.?s\.?\s*army', r'u\.?s\.?\s*navy', r'usmc', r'navy\s*seals?',
-        r'devgru', r'delta\s*force', r'sas\b',
-        # Copyright image violations — Amazon detects these from images too
-        r'john\s*wick', r'supergirl', r'supernatural', r'helldivers?',
-        r'peaky\s*blinder', r'mandalorian', r'baby\s*yoda', r'grogu',
-        r'boba\s*fett', r'darth\s*vader', r'stormtrooper',
-        r'goku', r'vegeta', r'frieza', r'saiyan', r'kamehameha',
-        r'luffy', r'zoro', r'sanji',
-        r'witcher', r'geralt', r'ciri',
+        r'disney', r'pixar', r'dreamworks', r'universal\s*studios',
+        r'pokemon', r'pikachu', r'lego', r'transformers', r'barbie',
+        r'hot\s*wheels', r'hasbro', r'mattel', r'bandai', r'funko',
+        r'games\s*workshop', r'warhammer', r'space\s*marine',
+
+        # === SPORTS ===
+        r'messi', r'ronaldo', r'cr7', r'mbapp[eé]', r'neymar', r'haaland',
+        r'bellingham', r'barcelona', r'real\s*madrid', r'man\s*utd',
+        r'liverpool', r'chelsea', r'arsenal', r'psg', r'juventus', r'bayern',
+        r'fifa', r'nba', r'nfl', r'premier\s*league', r'champions\s*league',
+
+        # === DC COMICS ===
+        r'batman', r'superman', r'wonder\s*woman', r'aquaman', r'flash\s*gordon',
+        r'green\s*lantern', r'green\s*arrow', r'cyborg',
+        r'joker', r'harley\s*quinn', r'cat\s*woman', r'catwoman',
+        r'poison\s*ivy', r'bane\b', r'scarecrow',
+        r'justice\s*league', r'dc\s*universe', r'gotham',
+        r'judge\s*dredd', r'hellboy', r'spawn\b',
+        r'watchmen', r'rorschach',
+        r'supergirl', r'batgirl', r'nightwing', r'robin\s*hood',
+
+        # === MARVEL ===
+        r'spider\s*man', r'spiderman', r'iron\s*man', r'ironman',
+        r'captain\s*america', r'avengers', r'thanos', r'hulk',
+        r'thor\b', r'wolverine', r'deadpool', r'venom',
+        r'black\s*panther', r'black\s*widow', r'ant\s*man',
+        r'doctor\s*strange', r'scarlet\s*witch', r'wanda',
+        r'vision\b', r'loki\b', r'magneto', r'mystique',
+        r'professor\s*x', r'x\s*men', r'x-men', r'cyclops',
+        r'gambit', r'storm\b.*mutant', r'rogue\b.*marvel',
+        r'punisher', r'daredevil', r'ghost\s*rider',
+        r'silver\s*surfer', r'galactus', r'thanos',
+        r'guardians.*galaxy', r'groot\b', r'rocket\s*raccoon',
+        r'blade\b.*vampire',
+
+        # === STAR WARS ===
+        r'star\s*wars', r'darth\s*vader', r'darth\s*maul',
+        r'luke\s*skywalker', r'skywalker', r'yoda\b',
+        r'baby\s*yoda', r'grogu', r'mandalorian',
+        r'boba\s*fett', r'stormtrooper', r'jedi\b', r'sith\b',
+        r'chewbacca', r'wookiee', r'lightsaber', r'light\s*saber',
+        r'millennium\s*falcon', r'death\s*star',
+        r'kylo\s*ren', r'palpatine', r'emperor.*force',
+        r'clone\s*trooper', r'ahsoka', r'obi\s*wan',
+
+        # === HARRY POTTER / WIZARDING WORLD ===
+        r'harry\s*potter', r'hogwarts', r'dumbledore', r'voldemort',
+        r'hermione', r'snape', r'slytherin', r'gryffindor',
+        r'hufflepuff', r'ravenclaw', r'quidditch',
+
+        # === LORD OF THE RINGS / TOLKIEN ===
+        r'lord\s*of\s*the\s*rings', r'lotr', r'hobbit',
+        r'gandalf', r'aragorn', r'legolas', r'gimli',
+        r'frodo', r'sauron', r'gollum', r'mordor',
+        r'middle\s*earth', r'shire\b', r'nazgul', r'ringwraith',
+
+        # === NINTENDO ===
+        r'zelda', r'hyrule', r'triforce', r'ganondorf', r'ganon',
+        r'mario\b', r'luigi\b', r'princess\s*peach', r'bowser',
+        r'donkey\s*kong', r'kirby\b', r'metroid', r'samus',
+        r'pikachu', r'charizard', r'mewtwo', r'eevee',
+
+        # === ANIME / MANGA ===
+        r'dragon\s*ball', r'goku', r'vegeta', r'frieza', r'saiyan',
+        r'kamehameha', r'gohan', r'piccolo', r'broly', r'beerus',
+        r'naruto', r'sasuke', r'kakashi', r'itachi', r'akatsuki',
+        r'boruto', r'hokage', r'sharingan', r'rasengan',
+        r'one\s*piece', r'luffy', r'zoro', r'sanji', r'nami\b',
+        r'chopper.*one.piece', r'ace\b.*pirate',
+        r'demon\s*slayer', r'tanjiro', r'nezuko', r'zenitsu',
+        r'attack\s*on\s*titan', r'eren\s*jaeger', r'mikasa', r'levi\b.*titan',
+        r'jujutsu\s*kaisen', r'gojo', r'sukuna', r'itadori',
+        r'my\s*hero\s*academia', r'deku\b', r'all\s*might', r'bakugo',
+        r'bleach\b.*anime', r'ichigo.*bankai', r'bankai',
+        r'fullmetal\s*alchemist', r'edward\s*elric',
+        r'sailor\s*moon', r'evangelion', r'gundam',
+        r'berserk', r'guts\b.*sword', r'griffith',
+        r'chainsaw\s*man', r'denji\b', r'makima',
+        r'spy\s*x\s*family', r'anya\b.*spy',
+        r'tokyo\s*ghoul', r'kaneki',
+        r'death\s*note', r'hunter\s*x\s*hunter',
+        r'fairy\s*tail', r'sword\s*art\s*online',
+        r'cowboy\s*bebop', r'neon\s*genesis',
+        r'jojo.*bizarre', r'dio\s*brando',
+        r'inuyasha', r'mob\s*psycho',
+
+        # === MOVIES / TV ===
+        r'james\s*bond', r'007', r'no\s*time\s*to\s*die',
+        r'john\s*wick', r'matrix\b', r'neo\b.*matrix',
+        r'terminator', r'robocop', r'predator', r'alien\s*vs',
+        r'aliens?\b.*xenomorph', r'xenomorph', r'facehugger',
+        r'back\s*to\s*the\s*future', r'delorean',
+        r'jurassic\s*park', r'jurassic\s*world',
+        r'indiana\s*jones', r'ghostbusters',
+        r'rocky\b.*balboa', r'rambo\b', r'expendables',
+        r'top\s*gun', r'maverick\b.*pilot',
+        r'pennywise', r'it\s*clown',
+        r'freddy\s*krueger', r'jason\s*voorhees', r'michael\s*myers',
+        r'chucky\b', r'saw\b.*jigsaw', r'jigsaw',
+        r'peaky\s*blinder', r'breaking\s*bad', r'walter\s*white',
+        r'supernatural\b', r'walking\s*dead',
+        r'game\s*of\s*thrones', r'house.*dragon',
+        r'last\s*of\s*us', r'stranger\s*things',
+        r'squid\s*game', r'money\s*heist', r'la\s*casa\s*de\s*papel',
+        r'mad\s*max', r'fury\s*road',
+        r'pirates.*caribbean', r'jack\s*sparrow',
+        r'the\s*boys\b', r'homelander',
+        r'helldivers?',
+
+        # === VIDEO GAMES ===
+        r'god\s*of\s*war', r'kratos',
+        r'elden\s*ring', r'malenia', r'tarnished',
+        r'dark\s*souls', r'bloodborne',
+        r'monster\s*hunter',
         r'resident\s*evil', r'leon\s*kennedy', r'jill\s*valentine',
         r'tomb\s*raider', r'lara\s*croft',
-        r'mortal\s*kombat', r'street\s*fighter',
-        r'final\s*fantasy', r'cloud\s*strife',
-        r'overwatch', r'call\s*of\s*duty', r'halo\b',
-        r'doom\s*slayer', r'doom\s*guy',
-        r'assassin.?s\s*creed', r'elden\s*ring',
-        r'cyberpunk\s*2077', r'metal\s*gear',
+        r'mortal\s*kombat', r'sub\s*zero', r'scorpion.*kombat',
+        r'street\s*fighter', r'ryu\b.*fighter', r'chun\s*li',
+        r'tekken', r'king\s*of\s*fighters',
+        r'final\s*fantasy', r'cloud\s*strife', r'sephiroth',
+        r'overwatch', r'tracer\b.*overwatch',
+        r'call\s*of\s*duty', r'halo\b.*spartan', r'master\s*chief',
+        r'doom\s*slayer', r'doom\s*guy', r'doom\s*eternal',
+        r'assassin.?s\s*creed', r'ezio\b',
+        r'cyberpunk\s*2077', r'metal\s*gear', r'solid\s*snake',
         r'world\s*of\s*warcraft', r'warcraft',
-        # Flagged 31 Mar 2026
-        r'last\s*of\s*us', r'ellie.*joel', r'joel.*ellie',
-        r'berserk', r'guts\s*sword', r'griffith',
-        r'peaky\s*blinder', r'arthur\s*shel',
-        r'hellboy', r'spawn\b',
-        r'black\s*cat.*marvel', r'cat\s*woman', r'catwoman',
+        r'diablo\b', r'starcraft',
+        r'league\s*of\s*legends', r'dota\b',
+        r'fortnite', r'minecraft', r'roblox',
+        r'among\s*us', r'fall\s*guys',
+        r'bioshock', r'horizon\s*zero\s*dawn',
+        r'uncharted', r'nathan\s*drake',
+        r'the\s*witcher', r'witcher', r'geralt', r'ciri\b',
+        r'silent\s*hill', r'pyramid\s*head',
+        r'sekiro', r'ghost.*tsushima',
+        r'persona\b', r'shin\s*megami',
+        r'kingdom\s*hearts', r'sora\b.*keyblade',
+
+        # === VEHICLES / BRANDS ===
+        r'jeep', r'land\s*rover', r'ferrari', r'lamborghini', r'porsche',
+        r'mercedes', r'bmw\b', r'audi\b', r'bugatti', r'maserati',
+        r'rolls\s*royce', r'bentley', r'aston\s*martin',
+        r'ford\b.*mustang', r'mustang\b.*car', r'corvette',
+        r'harley\s*davidson',
+
+        # === MILITARY BRANCHES (flagged as brands) ===
+        r'u\.?s\.?\s*army', r'u\.?s\.?\s*navy', r'usmc',
+        r'navy\s*seals?', r'devgru', r'delta\s*force', r'sas\b',
+        r'marines\b.*corps', r'green\s*beret',
     ]
     title_lower = title.lower()
     for term in TRADEMARK_TERMS:
