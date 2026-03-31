@@ -1,0 +1,13 @@
+TemplateType=fptcustom	Version=2026.0318	TemplateSignature=VE9ZU19BTkRfR0FNRVMsVE9ZX0ZJR1VSRQ==
+Feed Product Type	Seller SKU	Update Delete
+feed_product_type	item_sku	update_delete
+toyfigure	ALI-1005004674276467	Delete
+toyfigure	ALI-1005005424133081	Delete
+toyfigure	ALI-1005006085615910	Delete
+toyfigure	ALI-1005006087906247	Delete
+toyfigure	ALI-1005006226846209	Delete
+toyfigure	ALI-1005006853345498	Delete
+toyfigure	ALI-1005007434430167	Delete
+toyfigure	ALI-1005009373300228	Delete
+toyfigure	ALI-1005010487799705	Delete
+toyfigure	ALI-1005010569629065	Delete
