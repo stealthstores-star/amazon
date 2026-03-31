@@ -2326,6 +2326,12 @@ def _has_trademark_risk(title):
         r'assassin.?s\s*creed', r'elden\s*ring',
         r'cyberpunk\s*2077', r'metal\s*gear',
         r'world\s*of\s*warcraft', r'warcraft',
+        # Flagged 31 Mar 2026
+        r'last\s*of\s*us', r'ellie.*joel', r'joel.*ellie',
+        r'berserk', r'guts\s*sword', r'griffith',
+        r'peaky\s*blinder', r'arthur\s*shel',
+        r'hellboy', r'spawn\b',
+        r'black\s*cat.*marvel', r'cat\s*woman', r'catwoman',
     ]
     title_lower = title.lower()
     for term in TRADEMARK_TERMS:
