@@ -3935,21 +3935,49 @@ def _run_titles_only(urls, csv_out, out, use_login=True):
         done = 0
         failed = 0
         batch_start = time.time()
-        page = pages[0]  # Use first page for sequential scraping
+        page = pages[0]
 
-        # Sequential scrape — one URL at a time, fast
+        BLOCK_WORDS = ['unusual traffic', 'robot', 'check if you', 'captcha', 'verify your identity',
+                       'security check', 'blocked', 'access denied']
+
         for i, (pid, url_item) in enumerate(work):
+            # Load page
             try:
-                page.goto(url_item, wait_until="commit", timeout=8000)
-                time.sleep(0.1)
+                page.goto(url_item, wait_until="domcontentloaded", timeout=12000)
+                time.sleep(0.3)
             except Exception:
                 failed += 1
+                if (i + 1) % 10 == 0:
+                    log.info("  [%d/%d] done=%d failed=%d", i + 1, len(work), done, failed)
                 continue
 
+            # Check for block/captcha on EVERY page
+            blocked = False
+            try:
+                body = page.evaluate('document.body ? document.body.innerText.substring(0, 500) : ""').lower()
+                if any(w in body for w in BLOCK_WORDS):
+                    blocked = True
+            except Exception:
+                pass
+
+            if blocked:
+                log.warning("  [%d/%d] !!! BLOCKED !!! Solve in browser then press ENTER", i + 1, len(work))
+                print("\a", flush=True)
+                input("  >>> Press ENTER after solving to retry this URL... ")
+                try:
+                    page.goto(url_item, wait_until="domcontentloaded", timeout=12000)
+                    time.sleep(0.5)
+                except Exception:
+                    failed += 1
+                    continue
+
+            # Extract title
             try:
                 data = page.evaluate(EXTRACT_JS)
             except Exception:
                 failed += 1
+                if (i + 1) % 10 == 0:
+                    log.info("  [%d/%d] done=%d failed=%d", i + 1, len(work), done, failed)
                 continue
 
             title = data.get("title", "")
@@ -3958,8 +3986,31 @@ def _run_titles_only(urls, csv_out, out, use_login=True):
             images_list = data.get("images", [])
 
             if not title or title.lower().strip() in ("aliexpress", "aliexpress.com", ""):
-                failed += 1
-                continue
+                # Could be a block page that slipped through — check again
+                try:
+                    body2 = page.evaluate('document.body ? document.body.innerText.substring(0, 500) : ""').lower()
+                    if any(w in body2 for w in BLOCK_WORDS):
+                        log.warning("  [%d/%d] !!! BLOCKED !!! Solve in browser then press ENTER", i + 1, len(work))
+                        print("\a", flush=True)
+                        input("  >>> Press ENTER after solving to retry... ")
+                        try:
+                            page.goto(url_item, wait_until="domcontentloaded", timeout=12000)
+                            time.sleep(0.5)
+                            data = page.evaluate(EXTRACT_JS)
+                            title = data.get("title", "")
+                            price = data.get("price", "")
+                            image = data.get("image", "")
+                            images_list = data.get("images", [])
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                if not title or title.lower().strip() in ("aliexpress", "aliexpress.com", ""):
+                    failed += 1
+                    if (i + 1) % 10 == 0:
+                        log.info("  [%d/%d] done=%d failed=%d", i + 1, len(work), done, failed)
+                    continue
 
             product = {
                 "id": pid, "product_title": title, "product_price": price,
@@ -3974,7 +4025,7 @@ def _run_titles_only(urls, csv_out, out, use_login=True):
             csv_out.add([product], url_item)
             done += 1
 
-            if (i + 1) % 50 == 0:
+            if (i + 1) % 10 == 0:
                 elapsed = time.time() - batch_start
                 rate = done / elapsed if elapsed > 0 else 0
                 eta = (len(work) - i - 1) / rate / 60 if rate > 0 else 0
