@@ -3937,50 +3937,12 @@ def _run_titles_only(urls, csv_out, out, use_login=True):
         batch_start = time.time()
         page = pages[0]
 
-        def is_blocked(pg):
-            """Check if page is a block/captcha/robot page using EVERY method."""
-            try:
-                # 1. URL check — redirected away from product page
-                cur = pg.url.lower()
-                if '/item/' not in cur and 'aliexpress' in cur:
-                    return True
-                # 2. innerHTML check — catches text even in images/iframes
-                html = pg.evaluate('document.documentElement ? document.documentElement.innerHTML.substring(0, 3000) : ""').lower()
-                block_words = ['unusual traffic', 'robot', 'check if', 'captcha', 'verify',
-                               'security check', 'access denied', 'punish', 'blocked']
-                if any(w in html for w in block_words):
-                    return True
-                # 3. Page title check
-                title_check = pg.title().lower()
-                if any(w in title_check for w in ['captcha', 'robot', 'verify', 'blocked', 'security']):
-                    return True
-            except Exception:
-                pass
-            return False
-
-        def wait_for_unblock(pg, url_item, idx):
-            """Pause and wait for user to solve, then retry."""
-            while True:
-                log.warning("  [%d/%d] !!! BLOCKED/CAPTCHA !!! Solve in browser then press ENTER", idx + 1, len(work))
-                print("\a\a", flush=True)
-                input("  >>> Press ENTER after solving... ")
-                try:
-                    pg.goto(url_item, wait_until="domcontentloaded", timeout=15000)
-                    time.sleep(0.5)
-                except Exception:
-                    continue
-                if not is_blocked(pg):
-                    return True
-                log.warning("  Still blocked! Try again...")
-            return False
-
         for i, (pid, url_item) in enumerate(work):
             # Load page
             try:
                 page.goto(url_item, wait_until="domcontentloaded", timeout=12000)
                 time.sleep(0.3)
             except Exception:
-                # Page load failed — could be block, pause
                 log.warning("  [%d/%d] LOAD ERROR — check browser, press ENTER", i + 1, len(work))
                 print("\a", flush=True)
                 input("  >>> Press ENTER to retry... ")
@@ -3991,9 +3953,16 @@ def _run_titles_only(urls, csv_out, out, use_login=True):
                     failed += 1
                     continue
 
-            # Check for block on EVERY page
-            if is_blocked(page):
-                wait_for_unblock(page, url_item, i)
+            # Use the EXACT same is_captcha() as the main store scraper
+            while is_captcha(page):
+                log.warning("  [%d/%d] !!! CAPTCHA/ROBOT !!! Solve in browser then press ENTER", i + 1, len(work))
+                print("\a\a\a", flush=True)
+                input("  >>> Press ENTER after solving... ")
+                try:
+                    page.goto(url_item, wait_until="domcontentloaded", timeout=15000)
+                    time.sleep(0.5)
+                except Exception:
+                    pass
 
             # Extract title
             try:
@@ -4007,11 +3976,14 @@ def _run_titles_only(urls, csv_out, out, use_login=True):
             image = data.get("image", "")
             images_list = data.get("images", [])
 
-            # Empty title = might be blocked
             if not title or title.lower().strip() in ("aliexpress", "aliexpress.com", ""):
-                if is_blocked(page):
-                    wait_for_unblock(page, url_item, i)
+                while is_captcha(page):
+                    log.warning("  [%d/%d] !!! CAPTCHA/ROBOT !!! Solve in browser then press ENTER", i + 1, len(work))
+                    print("\a\a\a", flush=True)
+                    input("  >>> Press ENTER after solving... ")
                     try:
+                        page.goto(url_item, wait_until="domcontentloaded", timeout=15000)
+                        time.sleep(0.5)
                         data = page.evaluate(EXTRACT_JS)
                         title = data.get("title", "")
                         price = data.get("price", "")
