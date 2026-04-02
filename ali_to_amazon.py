@@ -3781,8 +3781,8 @@ def post_process(csv_path):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def _run_titles_only(urls, csv_out, out):
-    """Headless scrape — 30 separate contexts with unique fingerprints, round-robin one URL at a time."""
+def _run_titles_only(urls, csv_out, out, use_login=True):
+    """Fast title scrape — uses logged-in browser, visits each product page, grabs title only."""
     from playwright.sync_api import sync_playwright
     import random as _rnd
     NUM_CONTEXTS = 30
@@ -3864,130 +3864,122 @@ def _run_titles_only(urls, csv_out, out):
             continue
         work.append((pid, url))
 
-    log.info("TITLES-ONLY MODE: %d URLs, %d unique contexts with different fingerprints",
-             len(work), NUM_CONTEXTS)
+    log.info("TITLES-ONLY MODE: %d URLs to scrape, login=%s", len(work), use_login)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=[
-            "--disable-blink-features=AutomationControlled",
-            "--disable-gpu", "--no-sandbox",
-        ])
-
-        # Create N contexts, each with unique fingerprint
-        contexts = []
-        pages = []
-        for i in range(NUM_CONTEXTS):
-            ua = USER_AGENTS[i % len(USER_AGENTS)]
-            vp = VIEWPORTS[i % len(VIEWPORTS)]
-            locale = LOCALES[i % len(LOCALES)]
-            tz = TIMEZONES[i % len(TIMEZONES)]
-            ctx = browser.new_context(
-                viewport=vp, locale=locale, timezone_id=tz,
-                user_agent=ua,
-                color_scheme=_rnd.choice(["light", "dark"]),
-                device_scale_factor=_rnd.choice([1, 1.5, 2]),
-            )
-            ctx.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'languages', { get: () => ['""" + locale + """'] });
-            """)
+        if use_login:
+            # Visible browser — user logs in, then we scrape fast with session cookies
+            browser = pw.chromium.launch(headless=False, channel="msedge", args=[
+                "--disable-blink-features=AutomationControlled",
+            ])
+            ctx = browser.new_context(viewport={"width": 1280, "height": 800}, locale="en-US")
+            ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
             page = ctx.new_page()
-            contexts.append(ctx)
-            pages.append(page)
 
-        done = 0
-        captcha_retry = []
-        batch_start = time.time()
-
-        def process_batch(batch_items):
-            """Fire all 30 pages simultaneously, each in its own context. Harvest results."""
-            nonlocal done
-            retry = []
-
-            # Navigate all pages at once — each in different context/fingerprint
-            for ti, (pid, url_item) in enumerate(batch_items):
+            # Login
+            log.info("=" * 60)
+            log.info(">>> Please log in to AliExpress <<<")
+            log.info("=" * 60)
+            try:
+                page.goto("https://login.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
+            except Exception:
                 try:
-                    pages[ti].goto(url_item, wait_until="commit", timeout=8000)
+                    page.goto("https://www.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
                 except Exception:
                     pass
 
-            # Brief wait for all pages to render
-            time.sleep(0.8)
-
-            # Extract from each
-            for ti, (pid, url_item) in enumerate(batch_items):
+            logged_in = False
+            while not logged_in:
                 try:
-                    page_url = pages[ti].url.lower()
-                    page_title = pages[ti].title().lower()
-                    if "captcha" in page_url or "captcha" in page_title or "verify" in page_title:
-                        retry.append((pid, url_item))
-                        continue
-                    data = pages[ti].evaluate(EXTRACT_JS)
+                    cur = page.url.lower()
+                    if not any(w in cur for w in ["login", "passport", "signin"]):
+                        logged_in = True
+                        break
                 except Exception:
-                    retry.append((pid, url_item))
-                    continue
-                title = data.get("title", "")
-                price = data.get("price", "")
-                image = data.get("image", "")
-                images_list = data.get("images", [])
-                if not title or title.lower().strip() in ("aliexpress", "aliexpress.com", ""):
-                    retry.append((pid, url_item))
-                    continue
-                product = {
-                    "id": pid, "product_title": title, "product_price": price,
-                    "product_original_price": "", "product_discount": "",
-                    "product_url": url_item, "product_image": image,
-                    "product_images": "|".join(images_list) if images_list else image,
-                    "product_rating": "", "store_name": "", "store_url": "", "store_id": "",
-                    "total_sales": "", "ship_from": "", "store_member_id": "", "trade_info": "",
-                    "shipping": "", "launch_time": "", "company_name": "", "source_url": url_item,
-                    "variations": "", "variation_images": "",
-                }
-                csv_out.add([product], url_item)
-                done += 1
-            return retry
+                    pass
+                log.info("  Waiting for login...")
+                page.wait_for_timeout(3000)
 
-        # Main pass — batches of 30, all fired simultaneously
-        for batch_i in range(0, len(work), NUM_CONTEXTS):
-            batch = work[batch_i:batch_i + NUM_CONTEXTS]
-            retries = process_batch(batch)
-            captcha_retry.extend(retries)
+            log.info(">>> Login detected! Scraping titles... <<<")
+            log.info("=" * 60)
 
-            elapsed = time.time() - batch_start
-            rate = done / elapsed if elapsed > 0 else 0
-            remaining = len(work) - batch_i - len(batch) + len(captcha_retry)
-            eta = remaining / rate / 60 if rate > 0 else 0
-            if retries:
-                log.warning("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min  *** %d CAPTCHA ***",
-                            batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta, len(retries))
-            else:
-                log.info("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min",
-                         batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta)
+            contexts = [ctx]
+            pages = [page]
+        else:
+            # Headless mode with multiple fingerprinted contexts
+            browser = pw.chromium.launch(headless=True, args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-gpu", "--no-sandbox",
+            ])
+            contexts = []
+            pages = []
+            for i in range(NUM_CONTEXTS):
+                ua = USER_AGENTS[i % len(USER_AGENTS)]
+                vp = VIEWPORTS[i % len(VIEWPORTS)]
+                locale = LOCALES[i % len(LOCALES)]
+                tz = TIMEZONES[i % len(TIMEZONES)]
+                ctx = browser.new_context(
+                    viewport=vp, locale=locale, timezone_id=tz,
+                    user_agent=ua,
+                    color_scheme=_rnd.choice(["light", "dark"]),
+                    device_scale_factor=_rnd.choice([1, 1.5, 2]),
+                )
+                ctx.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    Object.defineProperty(navigator, 'languages', { get: () => ['""" + locale + """'] });
+                """)
+                p = ctx.new_page()
+                contexts.append(ctx)
+                pages.append(p)
 
-            # All failed = VPN burned
-            if len(retries) == len(batch) and len(batch) > 1:
-                log.warning("  !!!   CHANGE VPN   CHANGE VPN   CHANGE VPN   !!!")
-                print("\a\a\a", flush=True)
-                time.sleep(7)
+        done = 0
+        failed = 0
+        batch_start = time.time()
+        page = pages[0]  # Use first page for sequential scraping
 
-        # Retry pass
-        retry_round = 0
-        while captcha_retry:
-            retry_round += 1
-            log.info("  === RETRY ROUND %d: %d URLs remaining ===", retry_round, len(captcha_retry))
-            still_failing = []
-            for batch_i in range(0, len(captcha_retry), NUM_CONTEXTS):
-                batch = captcha_retry[batch_i:batch_i + NUM_CONTEXTS]
-                retries = process_batch(batch)
-                still_failing.extend(retries)
-            captcha_retry = still_failing
-            if captcha_retry:
-                log.warning("  !!!   CHANGE VPN   — %d URLs still failing   !!!", len(captcha_retry))
-                print("\a\a\a", flush=True)
-                time.sleep(7)
-                if retry_round >= 10:
-                    log.warning("  Gave up on %d URLs after %d retry rounds", len(captcha_retry), retry_round)
-                    break
+        # Sequential scrape — one URL at a time, fast
+        for i, (pid, url_item) in enumerate(work):
+            try:
+                page.goto(url_item, wait_until="commit", timeout=8000)
+                time.sleep(0.1)
+            except Exception:
+                failed += 1
+                continue
+
+            try:
+                data = page.evaluate(EXTRACT_JS)
+            except Exception:
+                failed += 1
+                continue
+
+            title = data.get("title", "")
+            price = data.get("price", "")
+            image = data.get("image", "")
+            images_list = data.get("images", [])
+
+            if not title or title.lower().strip() in ("aliexpress", "aliexpress.com", ""):
+                failed += 1
+                continue
+
+            product = {
+                "id": pid, "product_title": title, "product_price": price,
+                "product_original_price": "", "product_discount": "",
+                "product_url": url_item, "product_image": image,
+                "product_images": "|".join(images_list) if images_list else image,
+                "product_rating": "", "store_name": "", "store_url": "", "store_id": "",
+                "total_sales": "", "ship_from": "", "store_member_id": "", "trade_info": "",
+                "shipping": "", "launch_time": "", "company_name": "", "source_url": url_item,
+                "variations": "", "variation_images": "",
+            }
+            csv_out.add([product], url_item)
+            done += 1
+
+            if (i + 1) % 50 == 0:
+                elapsed = time.time() - batch_start
+                rate = done / elapsed if elapsed > 0 else 0
+                eta = (len(work) - i - 1) / rate / 60 if rate > 0 else 0
+                log.info("  [%d/%d] done=%d failed=%d  %.1f/sec  ETA: %.0f min",
+                         i + 1, len(work), done, failed, rate, eta)
 
         # Cleanup
         for p in pages:
@@ -4054,9 +4046,9 @@ def main():
     csv_out = LiveCSV(out, resume=resume)
     log.info("Output: %s (%d products already scraped)", out, csv_out.count)
 
-    # === TITLES-ONLY: completely separate path, no login, no store scraping ===
+    # === TITLES-ONLY: completely separate path ===
     if args.titles_only:
-        _run_titles_only(urls, csv_out, out)
+        _run_titles_only(urls, csv_out, out, use_login=True)
         return
 
     # Start local proxy forwarders for SOCKS5 proxies
