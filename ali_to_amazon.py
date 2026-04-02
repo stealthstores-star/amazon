@@ -3799,6 +3799,8 @@ def main():
                         help="Resume from existing CSV — skip already-scraped products")
     parser.add_argument("--post-process", dest="post_process", default=None, metavar="CSV",
                         help="Run only post-processing (rehost images, Amazon template, offer file) on an existing CSV")
+    parser.add_argument("--titles-only", action="store_true",
+                        help="Fast mode: treat URLs as product pages, scrape only title + price (no images/desc/variations)")
     args = parser.parse_args()
 
     if args.post_process:
@@ -3974,6 +3976,160 @@ def main():
 
         log.info(">>> Login detected! Starting scrape... <<<")
         log.info("=" * 60)
+
+        # === TITLES-ONLY MODE: fast scrape of individual product pages ===
+        if args.titles_only:
+            log.info("TITLES-ONLY MODE: scraping %d product URLs (title + price only)", len(urls))
+            for i, url in enumerate(urls, 1):
+                # Extract product ID from URL
+                pid_match = re.search(r'/item/(\d+)\.html', url)
+                if not pid_match:
+                    pid_match = re.search(r'/(\d{10,})\.html', url)
+                if not pid_match:
+                    pid_match = re.search(r'productId=(\d+)', url)
+                if not pid_match:
+                    log.warning("  [%d/%d] SKIP not a product URL: %s", i, len(urls), url[:80])
+                    continue
+                pid = pid_match.group(1)
+
+                if csv_out.already_scraped(pid):
+                    log.info("  [%d/%d] SKIP already scraped: %s", i, len(urls), pid)
+                    continue
+
+                log.info("  [%d/%d] %s", i, len(urls), url[:80])
+                try:
+                    tab.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    tab.wait_for_timeout(1500)
+                except Exception as e:
+                    if is_captcha(tab):
+                        handle_captcha(tab)
+                        try:
+                            tab.goto(url, wait_until="domcontentloaded", timeout=15000)
+                            tab.wait_for_timeout(1500)
+                        except Exception:
+                            log.warning("    SKIP load error: %s", str(e)[:60])
+                            continue
+                    else:
+                        log.warning("    SKIP load error: %s", str(e)[:60])
+                        continue
+
+                # Extract title and price from page
+                try:
+                    data = tab.evaluate("""
+                    () => {
+                        let title = '';
+                        let price = '';
+                        let image = '';
+                        let images = [];
+
+                        // Title
+                        const titleSels = ['h1[data-pl="product-title"]', 'h1.product-title-text',
+                                           'h1[class*="title"]', '.product-title h1', 'h1'];
+                        for (const sel of titleSels) {
+                            const el = document.querySelector(sel);
+                            if (el && el.innerText.trim().length > 5) {
+                                title = el.innerText.trim();
+                                break;
+                            }
+                        }
+
+                        // Price
+                        const priceSels = ['[class*="product-price-value"]', '[class*="uniform-banner-box-price"]',
+                                           '[class*="price--current"]', '.product-price-current',
+                                           '[class*="es--wrap--"] span'];
+                        for (const sel of priceSels) {
+                            try {
+                                const el = document.querySelector(sel);
+                                if (el) {
+                                    const pText = el.innerText.trim();
+                                    const m = pText.match(/[£$€]\\s*[\\d,]+\\.?\\d*/);
+                                    if (m) { price = m[0].trim(); break; }
+                                    const m2 = pText.match(/\\d+[,.]\\d{2}/);
+                                    if (m2) { price = '£' + m2[0]; break; }
+                                }
+                            } catch(e) {}
+                        }
+
+                        // Main image
+                        const imgSels = ['img[class*="magnifier--image"]', 'img.pdp-image',
+                                         '.image-view-magnifier-wrap img', 'img[class*="gallery"]'];
+                        for (const sel of imgSels) {
+                            const el = document.querySelector(sel);
+                            if (el && el.src && el.src.startsWith('http') && !el.src.includes('placeholder')) {
+                                image = el.src;
+                                break;
+                            }
+                        }
+
+                        // All images from gallery
+                        document.querySelectorAll('img[class*="slider--img"], img[class*="gallery"]').forEach(img => {
+                            if (img.src && img.src.startsWith('http') && !img.src.includes('placeholder')) {
+                                images.push(img.src.replace(/_\\d+x\\d+/, ''));
+                            }
+                        });
+                        // Deduplicate
+                        images = [...new Set(images)];
+
+                        return { title, price, image, images };
+                    }
+                    """)
+                except Exception as e:
+                    log.warning("    SKIP JS error: %s", str(e)[:60])
+                    continue
+
+                title = data.get("title", "")
+                price = data.get("price", "")
+                image = data.get("image", "")
+                images_list = data.get("images", [])
+
+                if not title:
+                    log.warning("    SKIP no title found")
+                    continue
+
+                log.info("    Title: %s", title[:80])
+                log.info("    Price: %s, Images: %d", price or "N/A", len(images_list))
+
+                product = {
+                    "id": pid,
+                    "product_title": title,
+                    "product_price": price,
+                    "product_original_price": "",
+                    "product_discount": "",
+                    "product_url": url,
+                    "product_image": image,
+                    "product_images": "|".join(images_list) if images_list else image,
+                    "product_rating": "",
+                    "store_name": "",
+                    "store_url": "",
+                    "store_id": "",
+                    "total_sales": "",
+                    "ship_from": "",
+                    "store_member_id": "",
+                    "trade_info": "",
+                    "shipping": "",
+                    "launch_time": "",
+                    "company_name": "",
+                    "source_url": url,
+                    "variations": "",
+                    "variation_images": "",
+                }
+                csv_out.write(product)
+                time.sleep(random.uniform(0.3, 0.8))
+
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
+                pass
+
+            csv_out.close()
+            log.info("Done! %d products -> %s", csv_out.count, out)
+            post_process(out)
+            return
 
         for i, url in enumerate(urls, 1):
             url = sort_by_orders(url)
