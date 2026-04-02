@@ -3782,9 +3782,10 @@ def post_process(csv_path):
 # Main
 # ---------------------------------------------------------------------------
 def _run_titles_only(urls, csv_out, out):
-    """Headless parallel scrape — title + price only, no login needed."""
+    """Headless scrape — 30 separate contexts with unique fingerprints, round-robin one URL at a time."""
     from playwright.sync_api import sync_playwright
-    PARALLEL = 30
+    import random as _rnd
+    NUM_CONTEXTS = 30
     EXTRACT_JS = """
     () => {
         let title = '';
@@ -3828,6 +3829,30 @@ def _run_titles_only(urls, csv_out, out):
     }
     """
 
+    # Random fingerprints for each context
+    USER_AGENTS = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    ]
+    VIEWPORTS = [
+        {"width": 1920, "height": 1080}, {"width": 1440, "height": 900},
+        {"width": 1366, "height": 768}, {"width": 1536, "height": 864},
+        {"width": 1280, "height": 800}, {"width": 1600, "height": 900},
+        {"width": 2560, "height": 1440}, {"width": 1280, "height": 720},
+    ]
+    LOCALES = ["en-US", "en-GB", "en-AU", "en-CA", "en-NZ"]
+    TIMEZONES = ["America/New_York", "America/Chicago", "America/Los_Angeles",
+                 "Europe/London", "Europe/Paris", "Europe/Berlin", "Australia/Sydney",
+                 "Asia/Tokyo", "America/Toronto", "Europe/Amsterdam"]
+
     # Build work list
     work = []
     for url in urls:
@@ -3839,51 +3864,65 @@ def _run_titles_only(urls, csv_out, out):
             continue
         work.append((pid, url))
 
-    log.info("TITLES-ONLY MODE: %d URLs to scrape (%d already done / skipped), %d parallel tabs",
-             len(work), len(urls) - len(work), PARALLEL)
+    log.info("TITLES-ONLY MODE: %d URLs, %d unique contexts with different fingerprints",
+             len(work), NUM_CONTEXTS)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=[
             "--disable-blink-features=AutomationControlled",
-            "--disable-images",
-            "--disable-gpu",
-            "--no-sandbox",
+            "--disable-gpu", "--no-sandbox",
         ])
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        )
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
 
-        tabs = []
-        for _ in range(PARALLEL):
-            try:
-                tabs.append(context.new_page())
-            except Exception:
-                break
+        # Create N contexts, each with unique fingerprint
+        contexts = []
+        pages = []
+        for i in range(NUM_CONTEXTS):
+            ua = USER_AGENTS[i % len(USER_AGENTS)]
+            vp = VIEWPORTS[i % len(VIEWPORTS)]
+            locale = LOCALES[i % len(LOCALES)]
+            tz = TIMEZONES[i % len(TIMEZONES)]
+            ctx = browser.new_context(
+                viewport=vp, locale=locale, timezone_id=tz,
+                user_agent=ua,
+                color_scheme=_rnd.choice(["light", "dark"]),
+                device_scale_factor=_rnd.choice([1, 1.5, 2]),
+            )
+            ctx.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['""" + locale + """'] });
+            """)
+            page = ctx.new_page()
+            contexts.append(ctx)
+            pages.append(page)
 
         done = 0
         captcha_retry = []
         batch_start = time.time()
 
         def process_batch(batch_items):
+            """Fire all 30 pages simultaneously, each in its own context. Harvest results."""
             nonlocal done
             retry = []
+
+            # Navigate all pages at once — each in different context/fingerprint
             for ti, (pid, url_item) in enumerate(batch_items):
                 try:
-                    tabs[ti].goto(url_item, wait_until="commit", timeout=8000)
+                    pages[ti].goto(url_item, wait_until="commit", timeout=8000)
                 except Exception:
                     pass
+
+            # Brief wait for all pages to render
             time.sleep(0.8)
+
+            # Extract from each
             for ti, (pid, url_item) in enumerate(batch_items):
                 try:
-                    page_url = tabs[ti].url.lower()
-                    page_title = tabs[ti].title().lower()
+                    page_url = pages[ti].url.lower()
+                    page_title = pages[ti].title().lower()
                     if "captcha" in page_url or "captcha" in page_title or "verify" in page_title:
                         retry.append((pid, url_item))
                         continue
-                    data = tabs[ti].evaluate(EXTRACT_JS)
+                    data = pages[ti].evaluate(EXTRACT_JS)
                 except Exception:
                     retry.append((pid, url_item))
                     continue
@@ -3908,28 +3947,28 @@ def _run_titles_only(urls, csv_out, out):
                 done += 1
             return retry
 
-        # Main pass
-        for batch_i in range(0, len(work), PARALLEL):
-            batch = work[batch_i:batch_i + PARALLEL]
+        # Main pass — batches of 30, all fired simultaneously
+        for batch_i in range(0, len(work), NUM_CONTEXTS):
+            batch = work[batch_i:batch_i + NUM_CONTEXTS]
             retries = process_batch(batch)
             captcha_retry.extend(retries)
+
             elapsed = time.time() - batch_start
             rate = done / elapsed if elapsed > 0 else 0
             remaining = len(work) - batch_i - len(batch) + len(captcha_retry)
             eta = remaining / rate / 60 if rate > 0 else 0
             if retries:
-                log.warning("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min  *** %d CAPTCHA/FAILED — CHANGE VPN ***",
+                log.warning("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min  *** %d CAPTCHA ***",
                             batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta, len(retries))
             else:
                 log.info("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min",
                          batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta)
+
+            # All failed = VPN burned
             if len(retries) == len(batch) and len(batch) > 1:
-                log.warning("")
                 log.warning("  !!!   CHANGE VPN   CHANGE VPN   CHANGE VPN   !!!")
-                log.warning("  All %d URLs in this batch failed. Waiting 30 sec...", len(batch))
-                log.warning("")
                 print("\a\a\a", flush=True)
-                time.sleep(30)
+                time.sleep(7)
 
         # Retry pass
         retry_round = 0
@@ -3937,31 +3976,26 @@ def _run_titles_only(urls, csv_out, out):
             retry_round += 1
             log.info("  === RETRY ROUND %d: %d URLs remaining ===", retry_round, len(captcha_retry))
             still_failing = []
-            for batch_i in range(0, len(captcha_retry), PARALLEL):
-                batch = captcha_retry[batch_i:batch_i + PARALLEL]
+            for batch_i in range(0, len(captcha_retry), NUM_CONTEXTS):
+                batch = captcha_retry[batch_i:batch_i + NUM_CONTEXTS]
                 retries = process_batch(batch)
                 still_failing.extend(retries)
-                if retries:
-                    log.warning("  RETRY [%d/%d] done=%d still_failing=%d  *** CHANGE VPN ***",
-                                batch_i + len(batch), len(captcha_retry), done, len(still_failing))
-                else:
-                    log.info("  RETRY [%d/%d] done=%d still_failing=%d",
-                             batch_i + len(batch), len(captcha_retry), done, len(still_failing))
             captcha_retry = still_failing
             if captcha_retry:
-                log.warning("  !!!   CHANGE VPN   CHANGE VPN   CHANGE VPN   !!!")
-                log.warning("  %d URLs still failing. Waiting 30 sec...", len(captcha_retry))
+                log.warning("  !!!   CHANGE VPN   — %d URLs still failing   !!!", len(captcha_retry))
                 print("\a\a\a", flush=True)
-                time.sleep(30)
-                if retry_round >= 5:
+                time.sleep(7)
+                if retry_round >= 10:
                     log.warning("  Gave up on %d URLs after %d retry rounds", len(captcha_retry), retry_round)
                     break
 
-        for t in tabs:
-            try: t.close()
+        # Cleanup
+        for p in pages:
+            try: p.close()
             except Exception: pass
-        try: context.close()
-        except Exception: pass
+        for ctx in contexts:
+            try: ctx.close()
+            except Exception: pass
         try: browser.close()
         except Exception: pass
 
