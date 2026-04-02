@@ -3894,88 +3894,75 @@ def main():
             """)
             tab = context.new_page()
 
-        # --- Login to AliExpress before scraping ---
-        ensure_browser()
-        log.info("=" * 60)
-        log.info(">>> Please log in to AliExpress in the browser window. <<<")
-        log.info("=" * 60)
-        log.info("Navigating to AliExpress login...")
-        try:
-            tab.goto("https://login.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
-            log.info("  Login page loaded.")
-        except Exception as e:
-            log.warning("  Login page failed (%s), trying main page...", str(e)[:80])
+        # --- Titles-only mode: skip login entirely ---
+        if not args.titles_only:
+            ensure_browser()
+            log.info("=" * 60)
+            log.info(">>> Please log in to AliExpress in the browser window. <<<")
+            log.info("=" * 60)
+            log.info("Navigating to AliExpress login...")
             try:
-                tab.goto("https://www.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
-                log.info("  Main page loaded.")
-            except Exception as e2:
-                log.warning("  Main page also failed: %s", str(e2)[:80])
+                tab.goto("https://login.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
+                log.info("  Login page loaded.")
+            except Exception as e:
+                log.warning("  Login page failed (%s), trying main page...", str(e)[:80])
+                try:
+                    tab.goto("https://www.aliexpress.com/", wait_until="domcontentloaded", timeout=30000)
+                    log.info("  Main page loaded.")
+                except Exception as e2:
+                    log.warning("  Main page also failed: %s", str(e2)[:80])
 
-        # Wait for user to complete login
-        # Check if already logged in (has account icon/name) or on login page
-        logged_in = False
-        while not logged_in:
-            try:
-                # Check if we're on a login/passport page
-                current_url = tab.url.lower()
-                on_login_page = any(w in current_url for w in ["login", "passport", "signin"])
-
-                if not on_login_page:
-                    # We navigated away from login — check if actually logged in
-                    # Look for account indicators (avatar, username, "My Account")
-                    account_indicators = tab.evaluate("""
-                    () => {
-                        // Check for common logged-in indicators
-                        const sels = [
-                            '[class*="my-account"]', '[class*="MyAccount"]',
-                            '[class*="user-name"]', '[class*="UserName"]',
-                            '[class*="avatar"]', '[class*="Avatar"]',
-                            'a[href*="buyer.aliexpress"]',
-                            '[class*="account-signed"]',
-                            'img[class*="avatar"]',
-                        ];
-                        for (const sel of sels) {
-                            const el = document.querySelector(sel);
-                            if (el) return true;
-                        }
-                        // Check if "Sign in" text is still showing (not logged in)
-                        const body = document.body.innerText || '';
-                        if (body.includes('My Account') || body.includes('My Orders')) return true;
-                        return false;
-                    }
-                    """)
-                    if account_indicators:
-                        logged_in = True
-                        break
-
-                    # Also accept if user just navigated to the main page
-                    # (they might have been already logged in via cookies)
-                    if "aliexpress.com" in current_url and not on_login_page:
-                        # Give user a moment, then ask
-                        tab.wait_for_timeout(2000)
-                        # Re-check
-                        account_check = tab.evaluate("""
+            # Wait for user to complete login
+            logged_in = False
+            while not logged_in:
+                try:
+                    current_url = tab.url.lower()
+                    on_login_page = any(w in current_url for w in ["login", "passport", "signin"])
+                    if not on_login_page:
+                        account_indicators = tab.evaluate("""
                         () => {
+                            const sels = [
+                                '[class*="my-account"]', '[class*="MyAccount"]',
+                                '[class*="user-name"]', '[class*="UserName"]',
+                                '[class*="avatar"]', '[class*="Avatar"]',
+                                'a[href*="buyer.aliexpress"]',
+                                '[class*="account-signed"]',
+                                'img[class*="avatar"]',
+                            ];
+                            for (const sel of sels) {
+                                const el = document.querySelector(sel);
+                                if (el) return true;
+                            }
                             const body = document.body.innerText || '';
-                            // If "Sign in" or "Join" prominent, not logged in
-                            const signInBtn = document.querySelector('a[href*="login"], [class*="sign-in"], [data-role="sign-in"]');
-                            if (signInBtn && signInBtn.offsetParent !== null) return false;
-                            return true;
+                            if (body.includes('My Account') || body.includes('My Orders')) return true;
+                            return false;
                         }
                         """)
-                        if account_check:
+                        if account_indicators:
                             logged_in = True
                             break
-            except Exception:
-                pass
+                        if "aliexpress.com" in current_url and not on_login_page:
+                            tab.wait_for_timeout(2000)
+                            account_check = tab.evaluate("""
+                            () => {
+                                const body = document.body.innerText || '';
+                                const signInBtn = document.querySelector('a[href*="login"], [class*="sign-in"], [data-role="sign-in"]');
+                                if (signInBtn && signInBtn.offsetParent !== null) return false;
+                                return true;
+                            }
+                            """)
+                            if account_check:
+                                logged_in = True
+                                break
+                except Exception:
+                    pass
+                if not logged_in:
+                    print("\a", flush=True)
+                    log.info("  Waiting for login... (log in and the scraper will continue automatically)")
+                    tab.wait_for_timeout(3000)
 
-            if not logged_in:
-                print("\a", flush=True)  # Beep
-                log.info("  Waiting for login... (log in and the scraper will continue automatically)")
-                tab.wait_for_timeout(3000)
-
-        log.info(">>> Login detected! Starting scrape... <<<")
-        log.info("=" * 60)
+            log.info(">>> Login detected! Starting scrape... <<<")
+            log.info("=" * 60)
 
         # === TITLES-ONLY MODE: headless parallel scrape — no login needed ===
         if args.titles_only:
