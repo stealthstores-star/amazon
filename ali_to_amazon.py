@@ -3781,6 +3781,197 @@ def post_process(csv_path):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def _run_titles_only(urls, csv_out, out):
+    """Headless parallel scrape — title + price only, no login needed."""
+    from playwright.sync_api import sync_playwright
+    PARALLEL = 30
+    EXTRACT_JS = """
+    () => {
+        let title = '';
+        let price = '';
+        let image = '';
+        let images = [];
+        const titleSels = ['h1[data-pl="product-title"]', 'h1.product-title-text',
+                           'h1[class*="title"]', '.product-title h1', 'h1'];
+        for (const sel of titleSels) {
+            const el = document.querySelector(sel);
+            if (el && el.innerText.trim().length > 5) { title = el.innerText.trim(); break; }
+        }
+        const priceSels = ['[class*="product-price-value"]', '[class*="uniform-banner-box-price"]',
+                           '[class*="price--current"]', '.product-price-current',
+                           '[class*="es--wrap--"] span'];
+        for (const sel of priceSels) {
+            try {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const pText = el.innerText.trim();
+                    const m = pText.match(/[£$€]\\s*[\\d,]+\\.?\\d*/);
+                    if (m) { price = m[0].trim(); break; }
+                    const m2 = pText.match(/\\d+[,.]\\d{2}/);
+                    if (m2) { price = '£' + m2[0]; break; }
+                }
+            } catch(e) {}
+        }
+        const imgSels = ['img[class*="magnifier--image"]', 'img.pdp-image',
+                         '.image-view-magnifier-wrap img', 'img[class*="gallery"]'];
+        for (const sel of imgSels) {
+            const el = document.querySelector(sel);
+            if (el && el.src && el.src.startsWith('http') && !el.src.includes('placeholder')) {
+                image = el.src; break;
+            }
+        }
+        document.querySelectorAll('img[class*="slider--img"], img[class*="gallery"]').forEach(img => {
+            if (img.src && img.src.startsWith('http') && !img.src.includes('placeholder'))
+                images.push(img.src.replace(/_\\d+x\\d+/, ''));
+        });
+        return { title, price, image, images: [...new Set(images)] };
+    }
+    """
+
+    # Build work list
+    work = []
+    for url in urls:
+        pid_match = re.search(r'/item/(\d+)\.html', url) or re.search(r'/(\d{10,})\.html', url) or re.search(r'productId=(\d+)', url)
+        if not pid_match:
+            continue
+        pid = pid_match.group(1)
+        if csv_out.already_scraped(pid):
+            continue
+        work.append((pid, url))
+
+    log.info("TITLES-ONLY MODE: %d URLs to scrape (%d already done / skipped), %d parallel tabs",
+             len(work), len(urls) - len(work), PARALLEL)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-images",
+            "--disable-gpu",
+            "--no-sandbox",
+        ])
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+
+        tabs = []
+        for _ in range(PARALLEL):
+            try:
+                tabs.append(context.new_page())
+            except Exception:
+                break
+
+        done = 0
+        captcha_retry = []
+        batch_start = time.time()
+
+        def process_batch(batch_items):
+            nonlocal done
+            retry = []
+            for ti, (pid, url_item) in enumerate(batch_items):
+                try:
+                    tabs[ti].goto(url_item, wait_until="commit", timeout=8000)
+                except Exception:
+                    pass
+            time.sleep(0.8)
+            for ti, (pid, url_item) in enumerate(batch_items):
+                try:
+                    page_url = tabs[ti].url.lower()
+                    page_title = tabs[ti].title().lower()
+                    if "captcha" in page_url or "captcha" in page_title or "verify" in page_title:
+                        retry.append((pid, url_item))
+                        continue
+                    data = tabs[ti].evaluate(EXTRACT_JS)
+                except Exception:
+                    retry.append((pid, url_item))
+                    continue
+                title = data.get("title", "")
+                price = data.get("price", "")
+                image = data.get("image", "")
+                images_list = data.get("images", [])
+                if not title or title.lower().strip() in ("aliexpress", "aliexpress.com", ""):
+                    retry.append((pid, url_item))
+                    continue
+                product = {
+                    "id": pid, "product_title": title, "product_price": price,
+                    "product_original_price": "", "product_discount": "",
+                    "product_url": url_item, "product_image": image,
+                    "product_images": "|".join(images_list) if images_list else image,
+                    "product_rating": "", "store_name": "", "store_url": "", "store_id": "",
+                    "total_sales": "", "ship_from": "", "store_member_id": "", "trade_info": "",
+                    "shipping": "", "launch_time": "", "company_name": "", "source_url": url_item,
+                    "variations": "", "variation_images": "",
+                }
+                csv_out.add([product], url_item)
+                done += 1
+            return retry
+
+        # Main pass
+        for batch_i in range(0, len(work), PARALLEL):
+            batch = work[batch_i:batch_i + PARALLEL]
+            retries = process_batch(batch)
+            captcha_retry.extend(retries)
+            elapsed = time.time() - batch_start
+            rate = done / elapsed if elapsed > 0 else 0
+            remaining = len(work) - batch_i - len(batch) + len(captcha_retry)
+            eta = remaining / rate / 60 if rate > 0 else 0
+            if retries:
+                log.warning("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min  *** %d CAPTCHA/FAILED — CHANGE VPN ***",
+                            batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta, len(retries))
+            else:
+                log.info("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min",
+                         batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta)
+            if len(retries) == len(batch) and len(batch) > 1:
+                log.warning("")
+                log.warning("  !!!   CHANGE VPN   CHANGE VPN   CHANGE VPN   !!!")
+                log.warning("  All %d URLs in this batch failed. Waiting 30 sec...", len(batch))
+                log.warning("")
+                print("\a\a\a", flush=True)
+                time.sleep(30)
+
+        # Retry pass
+        retry_round = 0
+        while captcha_retry:
+            retry_round += 1
+            log.info("  === RETRY ROUND %d: %d URLs remaining ===", retry_round, len(captcha_retry))
+            still_failing = []
+            for batch_i in range(0, len(captcha_retry), PARALLEL):
+                batch = captcha_retry[batch_i:batch_i + PARALLEL]
+                retries = process_batch(batch)
+                still_failing.extend(retries)
+                if retries:
+                    log.warning("  RETRY [%d/%d] done=%d still_failing=%d  *** CHANGE VPN ***",
+                                batch_i + len(batch), len(captcha_retry), done, len(still_failing))
+                else:
+                    log.info("  RETRY [%d/%d] done=%d still_failing=%d",
+                             batch_i + len(batch), len(captcha_retry), done, len(still_failing))
+            captcha_retry = still_failing
+            if captcha_retry:
+                log.warning("  !!!   CHANGE VPN   CHANGE VPN   CHANGE VPN   !!!")
+                log.warning("  %d URLs still failing. Waiting 30 sec...", len(captcha_retry))
+                print("\a\a\a", flush=True)
+                time.sleep(30)
+                if retry_round >= 5:
+                    log.warning("  Gave up on %d URLs after %d retry rounds", len(captcha_retry), retry_round)
+                    break
+
+        for t in tabs:
+            try: t.close()
+            except Exception: pass
+        try: context.close()
+        except Exception: pass
+        try: browser.close()
+        except Exception: pass
+
+    csv_out.close()
+    total_time = time.time() - batch_start
+    log.info("Done! %d products scraped -> %s (%.0f sec, %.1f/sec)",
+             done, out, total_time, done / total_time if total_time > 0 else 0)
+    post_process(out)
+
+
 def main():
     global _cached_moduleanalysis_url, _store_desc_strategy, _store_desc_failures
     parser = argparse.ArgumentParser(
@@ -3828,6 +4019,11 @@ def main():
 
     csv_out = LiveCSV(out, resume=resume)
     log.info("Output: %s (%d products already scraped)", out, csv_out.count)
+
+    # === TITLES-ONLY: completely separate path, no login, no store scraping ===
+    if args.titles_only:
+        _run_titles_only(urls, csv_out, out)
+        return
 
     # Start local proxy forwarders for SOCKS5 proxies
     proxy_local_urls = []
@@ -3963,260 +4159,6 @@ def main():
 
             log.info(">>> Login detected! Starting scrape... <<<")
             log.info("=" * 60)
-
-        # === TITLES-ONLY MODE: headless parallel scrape — no login needed ===
-        if args.titles_only:
-            PARALLEL = 30  # M4 Max can handle it
-            EXTRACT_JS = """
-            () => {
-                let title = '';
-                let price = '';
-                let image = '';
-                let images = [];
-                const titleSels = ['h1[data-pl="product-title"]', 'h1.product-title-text',
-                                   'h1[class*="title"]', '.product-title h1', 'h1'];
-                for (const sel of titleSels) {
-                    const el = document.querySelector(sel);
-                    if (el && el.innerText.trim().length > 5) { title = el.innerText.trim(); break; }
-                }
-                const priceSels = ['[class*="product-price-value"]', '[class*="uniform-banner-box-price"]',
-                                   '[class*="price--current"]', '.product-price-current',
-                                   '[class*="es--wrap--"] span'];
-                for (const sel of priceSels) {
-                    try {
-                        const el = document.querySelector(sel);
-                        if (el) {
-                            const pText = el.innerText.trim();
-                            const m = pText.match(/[£$€]\\s*[\\d,]+\\.?\\d*/);
-                            if (m) { price = m[0].trim(); break; }
-                            const m2 = pText.match(/\\d+[,.]\\d{2}/);
-                            if (m2) { price = '£' + m2[0]; break; }
-                        }
-                    } catch(e) {}
-                }
-                const imgSels = ['img[class*="magnifier--image"]', 'img.pdp-image',
-                                 '.image-view-magnifier-wrap img', 'img[class*="gallery"]'];
-                for (const sel of imgSels) {
-                    const el = document.querySelector(sel);
-                    if (el && el.src && el.src.startsWith('http') && !el.src.includes('placeholder')) {
-                        image = el.src; break;
-                    }
-                }
-                document.querySelectorAll('img[class*="slider--img"], img[class*="gallery"]').forEach(img => {
-                    if (img.src && img.src.startsWith('http') && !img.src.includes('placeholder'))
-                        images.push(img.src.replace(/_\\d+x\\d+/, ''));
-                });
-                return { title, price, image, images: [...new Set(images)] };
-            }
-            """
-
-            # Close the login browser — we don't need it
-            try:
-                context.close()
-            except Exception:
-                pass
-            try:
-                if browser:
-                    browser.close()
-            except Exception:
-                pass
-
-            # Launch headless browser — no UI, pure speed
-            log.info("TITLES-ONLY MODE: launching headless browser with %d parallel tabs", PARALLEL)
-            browser = pw.chromium.launch(headless=True, args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-images",  # don't load images — faster
-                "--disable-gpu",
-                "--no-sandbox",
-            ])
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
-
-            # Build work list
-            work = []
-            for url in urls:
-                pid_match = re.search(r'/item/(\d+)\.html', url) or re.search(r'/(\d{10,})\.html', url) or re.search(r'productId=(\d+)', url)
-                if not pid_match:
-                    continue
-                pid = pid_match.group(1)
-                if csv_out.already_scraped(pid):
-                    continue
-                work.append((pid, url))
-
-            log.info("  %d URLs to scrape (%d already done / skipped)", len(work), len(urls) - len(work))
-
-            # Open parallel tabs
-            tabs = []
-            for _ in range(PARALLEL):
-                try:
-                    tabs.append(context.new_page())
-                except Exception:
-                    break
-
-            done = 0
-            captcha_retry = []  # URLs that hit captcha — retry later
-            batch_start = time.time()
-
-            def process_batch(batch_items):
-                """Navigate all tabs, extract data. Returns list of (pid, url) that need retry."""
-                nonlocal done
-                retry = []
-
-                # Navigate all tabs simultaneously
-                for ti, (pid, url_item) in enumerate(batch_items):
-                    try:
-                        tabs[ti].goto(url_item, wait_until="commit", timeout=8000)
-                    except Exception:
-                        pass
-
-                # Wait for pages to render
-                time.sleep(0.8)
-
-                # Extract from all tabs
-                for ti, (pid, url_item) in enumerate(batch_items):
-                    try:
-                        # Quick captcha check
-                        page_url = tabs[ti].url.lower()
-                        page_title = tabs[ti].title().lower()
-                        if "captcha" in page_url or "captcha" in page_title or "verify" in page_title:
-                            retry.append((pid, url_item))
-                            continue
-
-                        data = tabs[ti].evaluate(EXTRACT_JS)
-                    except Exception:
-                        retry.append((pid, url_item))
-                        continue
-
-                    title = data.get("title", "")
-                    price = data.get("price", "")
-                    image = data.get("image", "")
-                    images_list = data.get("images", [])
-
-                    # Empty title or "Aliexpress" = page didn't load properly
-                    if not title or title.lower().strip() in ("aliexpress", "aliexpress.com", ""):
-                        retry.append((pid, url_item))
-                        continue
-
-                    product = {
-                        "id": pid,
-                        "product_title": title,
-                        "product_price": price,
-                        "product_original_price": "",
-                        "product_discount": "",
-                        "product_url": url_item,
-                        "product_image": image,
-                        "product_images": "|".join(images_list) if images_list else image,
-                        "product_rating": "",
-                        "store_name": "",
-                        "store_url": "",
-                        "store_id": "",
-                        "total_sales": "",
-                        "ship_from": "",
-                        "store_member_id": "",
-                        "trade_info": "",
-                        "shipping": "",
-                        "launch_time": "",
-                        "company_name": "",
-                        "source_url": url_item,
-                        "variations": "",
-                        "variation_images": "",
-                    }
-                    csv_out.add([product], url_item)
-                    done += 1
-
-                return retry
-
-            # Main pass
-            for batch_i in range(0, len(work), PARALLEL):
-                batch = work[batch_i:batch_i + PARALLEL]
-                retries = process_batch(batch)
-                captcha_retry.extend(retries)
-
-                elapsed = time.time() - batch_start
-                rate = done / elapsed if elapsed > 0 else 0
-                remaining = len(work) - batch_i - len(batch) + len(captcha_retry)
-                eta = remaining / rate / 60 if rate > 0 else 0
-
-                if retries:
-                    log.warning("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min  *** %d CAPTCHA/FAILED — CHANGE VPN ***",
-                                batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta, len(retries))
-                else:
-                    log.info("  [%d/%d] done=%d retry=%d  %.1f/sec  ETA: %.0f min",
-                             batch_i + len(batch), len(work), done, len(captcha_retry), rate, eta)
-
-                # If too many captchas in a row, pause and yell
-                if len(retries) == len(batch) and len(batch) > 1:
-                    log.warning("")
-                    log.warning("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                    log.warning("  !!!   CHANGE VPN   CHANGE VPN   CHANGE VPN   !!!")
-                    log.warning("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                    log.warning("")
-                    log.warning("  All %d URLs in this batch failed. Waiting 30 sec for VPN change...", len(batch))
-                    print("\a\a\a", flush=True)  # Triple beep
-                    time.sleep(30)
-
-            # Retry pass — keep retrying until all done
-            retry_round = 0
-            while captcha_retry:
-                retry_round += 1
-                log.info("  === RETRY ROUND %d: %d URLs remaining ===", retry_round, len(captcha_retry))
-
-                still_failing = []
-                for batch_i in range(0, len(captcha_retry), PARALLEL):
-                    batch = captcha_retry[batch_i:batch_i + PARALLEL]
-                    retries = process_batch(batch)
-                    still_failing.extend(retries)
-
-                    elapsed = time.time() - batch_start
-                    rate = done / elapsed if elapsed > 0 else 0
-                    if retries:
-                        log.warning("  RETRY [%d/%d] done=%d still_failing=%d  *** CHANGE VPN ***",
-                                    batch_i + len(batch), len(captcha_retry), done, len(still_failing))
-                    else:
-                        log.info("  RETRY [%d/%d] done=%d still_failing=%d",
-                                 batch_i + len(batch), len(captcha_retry), done, len(still_failing))
-
-                captcha_retry = still_failing
-
-                if captcha_retry:
-                    log.warning("")
-                    log.warning("  !!!   CHANGE VPN   CHANGE VPN   CHANGE VPN   !!!")
-                    log.warning("  %d URLs still failing. Waiting 30 sec for VPN change...", len(captcha_retry))
-                    log.warning("")
-                    print("\a\a\a", flush=True)
-                    time.sleep(30)
-
-                    # After 5 retry rounds, give up on remaining
-                    if retry_round >= 5:
-                        log.warning("  Gave up on %d URLs after %d retry rounds", len(captcha_retry), retry_round)
-                        break
-
-            # Cleanup
-            for t in tabs:
-                try:
-                    t.close()
-                except Exception:
-                    pass
-            try:
-                context.close()
-            except Exception:
-                pass
-            try:
-                if browser:
-                    browser.close()
-            except Exception:
-                pass
-
-            csv_out.close()
-            total_time = time.time() - batch_start
-            log.info("Done! %d products scraped -> %s (%.0f sec, %.1f/sec)",
-                     done, out, total_time, done / total_time if total_time > 0 else 0)
-            post_process(out)
-            return
 
         for i, url in enumerate(urls, 1):
             url = sort_by_orders(url)
