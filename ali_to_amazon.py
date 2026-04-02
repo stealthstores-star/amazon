@@ -4113,7 +4113,7 @@ def main():
                     "variations": "",
                     "variation_images": "",
                 }
-                csv_out.write(product)
+                csv_out.add([product], url)
                 time.sleep(random.uniform(0.3, 0.8))
 
             try:
